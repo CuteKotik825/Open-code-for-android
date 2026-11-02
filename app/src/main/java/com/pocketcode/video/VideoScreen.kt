@@ -1,6 +1,7 @@
 package com.pocketcode.video
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -70,6 +71,9 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
     var minSilence by remember { mutableStateOf(0.6) }
     var quality by remember { mutableStateOf(VideoQuality.BALANCED) }
     var small by remember { mutableStateOf(false) }
+    var transition by remember { mutableStateOf(Transition.ZOOM) }
+    var editing by remember { mutableStateOf(false) }
+    var withPauses by remember { mutableStateOf(false) }
     var doCut by remember { mutableStateOf(true) }
     var doSubs by remember { mutableStateOf(false) }
     var subStyle by remember { mutableStateOf(SubStyle.CLASSIC) }
@@ -79,7 +83,7 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
 
     val info = v.info
     val a = v.analysis
-    val opt = VideoOptions(quality, if (small) 720 else 0)
+    val opt = VideoOptions(quality, if (small) 720 else 0, transition)
 
     fun start(rel: String, cut: Boolean, subs: SubStyle?) {
         note = null
@@ -89,6 +93,23 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
             return
         }
         v.produceUi(rel, cut, minSilence, noise.toInt(), opt, subs, lang)
+    }
+
+    val editor = v.textEdit()
+    BackHandler(enabled = editing) { editing = false }
+    if (editing && editor != null && info != null) {
+        TextEditScreen(
+            v = v, edit = editor, info = info,
+            pauses = a?.takeIf { it.info.rel == info.rel }?.cuts,
+            withPauses = withPauses, onWithPauses = { withPauses = it },
+            busy = v.busy, onBack = { editing = false },
+            onRender = { cuts ->
+                editing = false
+                note = null
+                v.cutRangesUi(info.rel, cuts, opt, if (doSubs) subStyle else null, lang)
+            },
+        )
+        return
     }
 
     Scaffold(topBar = {
@@ -189,6 +210,17 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
                     }
 
                     if (doCut || doSubs) {
+                        Text("Переходы между кусками:", style = MaterialTheme.typography.labelMedium)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Transition.values().forEach { t ->
+                                FilterChip(selected = transition == t, enabled = !v.busy, onClick = { transition = t }, label = { Text(t.label) })
+                            }
+                        }
+                        Text(transition.about, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (transition.xfade != null) Text(
+                            "Наплывы монтируются медленнее обычных склеек. Если эффект не получится, приложение само сделает резкие склейки.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         Text("Качество и скорость:", style = MaterialTheme.typography.labelMedium)
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             VideoQuality.values().forEach { q ->
@@ -322,6 +354,7 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
                             modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp).verticalScroll(rememberScrollState()),
                         )
                     }
+                    Button(onClick = { note = null; editing = true }) { Text("Монтаж по тексту: вычеркнуть слова") }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { clipboard.setText(AnnotatedString(tr.plainText())); note = "Текст скопирован" }) { Text("Копировать") }
                         OutlinedButton(onClick = {
@@ -372,7 +405,7 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
             note?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary) }
 
             Text(
-                "Агент в чате умеет то же: «вырежи паузы из video/clip.mp4», «добавь субтитры». Монтаж по тексту добавим следующей версией.",
+                "Агент в чате умеет то же: «вырежи паузы из video/clip.mp4», «добавь субтитры». Можно сказать и так: «вырежи из видео все ошибки и повторы, субтитры в стиле неон».",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 24.dp),
             )

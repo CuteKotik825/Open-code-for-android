@@ -36,7 +36,7 @@ enum class VideoQuality(val label: String, val preset: String, val crf: Int) {
     HIGH("Качество", "faster", 20),
 }
 
-data class VideoOptions(val quality: VideoQuality = VideoQuality.BALANCED, val maxHeight: Int = 0)
+data class VideoOptions(val quality: VideoQuality = VideoQuality.BALANCED, val maxHeight: Int = 0, val transition: Transition = Transition.ZOOM)
 
 data class TimeRange(val start: Double, val end: Double) {
     val length: Double get() = end - start
@@ -49,6 +49,7 @@ data class VideoInfo(
     val width: Int,
     val height: Int,
     val bytes: Long,
+    val fps: Double = 30.0,
 )
 
 data class SilenceAnalysis(
@@ -349,6 +350,7 @@ class VideoPipeline(
             width = if (swap) ch else cw,
             height = if (swap) cw else ch,
             bytes = File(root(), rel).length(),
+            fps = (VIDEO_FPS.find(text)?.groupValues?.get(1)?.toDoubleOrNull() ?: 30.0).coerceIn(15.0, 60.0),
         )
         info = vi
         return vi
@@ -427,7 +429,25 @@ class VideoPipeline(
      * Длинные видео собираются порциями по BATCH кусков, чтобы не упереться в память.
      */
     private suspend fun doRender(vi: VideoInfo, keep: List<TimeRange>, opt: VideoOptions, subs: SubStyle?, tr: Transcript?, cut: Boolean): String {
-        if (keep.isEmpty()) throw IllegalStateException("После вырезания ничего не осталось: уберите чувствительность (порог ближе к −45 дБ) или удлините паузу.")
+        if (keep.isEmpty()) throw IllegalStateException("После вырезания ничего не осталось: верните часть слов или ослабьте поиск пауз (порог ближе к −45 дБ, пауза подлиннее).")
+        if (subs != null) ensureSubtitleTools()
+        if (opt.transition == Transition.CUT || keep.size < 2) return renderOnce(vi, keep, opt, subs, tr, cut)
+        return try {
+            renderOnce(vi, keep, opt, subs, tr, cut)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IllegalStateException) {
+            // Эффект не получился (например, в этом ffmpeg нет такого перехода): повторяем с обычными склейками
+            AppLog.log("ERROR", "Видео: переход «${opt.transition.label}» не вышел: " + (e.message ?: "").take(300))
+            val out = renderOnce(vi, keep, opt.copy(transition = Transition.CUT), subs, tr, cut)
+            resultNote += " Переход «${opt.transition.label}» не получился, сделал резкие склейки."
+            message = "Готово: $resultNote"
+            out
+        }
+    }
+
+    private suspend fun renderOnce(vi: VideoInfo, keep: List<TimeRange>, opt: VideoOptions, subs: SubStyle?, tr: Transcript?, cut: Boolean): String {
+        if (keep.isEmpty()) throw IllegalStateException("После вырезания ничего не осталось: верните часть слов или ослабьте поиск пауз (порог ближе к −45 дБ, пауза подлиннее).")
         if (subs != null) ensureSubtitleTools()
         stage = VideoStage.RENDER
         progress = 0f
@@ -437,10 +457,17 @@ class VideoPipeline(
         val workDir = File(root(), work)
         workDir.deleteRecursively()
         workDir.mkdirs()
-        val total = keep.sumOf { it.length }
-        val phrases = if (subs != null && tr != null) Subtitles.build(tr, keep, subs) else emptyList()
-        val (ow, oh) = outSize(vi, opt)
         val batches = keep.chunked(BATCH)
+        val plans = batches.map { makePlan(it, opt.transition, vi.fps) }
+        val total = plans.sumOf { it.partDur }
+        val starts = DoubleArray(keep.size)
+        run {
+            var idx = 0
+            var off = 0.0
+            for (p in plans) { for (st in p.starts) starts[idx++] = off + st; off += p.partDur }
+        }
+        val phrases = if (subs != null && tr != null) Subtitles.build(tr, keep, subs, starts) else emptyList()
+        val (ow, oh) = outSize(vi, opt)
         val parts = ArrayList<String>()
         val tail = ArrayDeque<String>()
         var done = 0.0
@@ -449,7 +476,7 @@ class VideoPipeline(
             for ((i, batch) in batches.withIndex()) {
                 val w0 = batch.first().start
                 val w1 = batch.last().end
-                val partDur = batch.sumOf { it.length }
+                val partDur = plans[i].partDur
                 val target = if (batches.size == 1) out else String.format(Locale.US, "%s/p%03d.mp4", work, i)
                 val startDone = done
                 var assRel: String? = null
@@ -460,7 +487,7 @@ class VideoPipeline(
                         File(root(), assRel).writeText(Subtitles.ass(sel, subs, ow, oh, startDone))
                     }
                 }
-                val code = runStreaming(ffmpegCut(vi, batch, w0, w1, opt, target, assRel), 3 * 3600L) { line ->
+                val code = runStreaming(ffmpegCut(vi, batch, w0, w1, opt, target, assRel, plans[i], i * BATCH), 3 * 3600L) { line ->
                     val t = progressSeconds(line)
                     if (t != null) {
                         val now = startDone + minOf(t, partDur)
@@ -493,7 +520,7 @@ class VideoPipeline(
             resultRel = out
             var note = "Было ${fmtTime(vi.duration)}, стало ${fmtTime(total)}, файл ${fmtSize(f.length())}."
             if (subs != null && tr != null) {
-                val srtPhrases = Subtitles.build(tr, keep, SubStyle.CLASSIC)
+                val srtPhrases = Subtitles.build(tr, keep, SubStyle.CLASSIC, starts)
                 if (srtPhrases.isNotEmpty()) {
                     val srt = out.removeSuffix(".mp4") + ".srt"
                     File(root(), srt).writeText(Subtitles.srt(srtPhrases))
@@ -513,25 +540,66 @@ class VideoPipeline(
         }
     }
 
-    /** Один проход ffmpeg: вырезает куски batch из окна [w0, w1], склеивает их и (если нужно) вшивает субтитры из файла [ass]. */
-    private fun ffmpegCut(vi: VideoInfo, batch: List<TimeRange>, w0: Double, w1: Double, opt: VideoOptions, target: String, ass: String?): String {
+    /**
+     * Один проход ffmpeg: вырезает куски batch из окна [w0, w1], соединяет их выбранным переходом и (если нужно) вшивает субтитры из файла [ass].
+     * [base] — номер первого куска порции во всём видео (чтобы зум и «Микс» чередовались сквозь порции).
+     */
+    private fun ffmpegCut(vi: VideoInfo, batch: List<TimeRange>, w0: Double, w1: Double, opt: VideoOptions, target: String, ass: String?, plan: Plan, base: Int): String {
+        val tr = opt.transition
+        val xf = tr.xfade != null && batch.size > 1
+        val (ow, oh) = outSize(vi, opt)
+        val zoom = tr.zoom && ow % 2 == 0 && oh % 2 == 0
+        val zw = (ow * 1.12).toInt() and 1.inv()
+        val zh = (oh * 1.12).toInt() and 1.inv()
+        val fps = String.format(Locale.US, "%.3f", plan.fps)
         val sb = StringBuilder()
         for ((i, r) in batch.withIndex()) {
             val a = f(r.start - w0)
             val b = f(r.end - w0)
-            sb.append("[0:v]trim=start=$a:end=$b,setpts=PTS-STARTPTS[v$i];")
-            if (vi.hasAudio) sb.append("[0:a]atrim=start=$a:end=$b,asetpts=PTS-STARTPTS[a$i];")
+            sb.append("[0:v]trim=start=$a:end=$b,setpts=PTS-STARTPTS")
+            if (xf) sb.append(",fps=$fps,tpad=stop_mode=clone:stop_duration=0.5,trim=end_frame=${plan.frames[i]},setpts=PTS-STARTPTS")
+            if (zoom) sb.append(if ((base + i) % 2 == 1) ",scale=$zw:$zh,crop=$ow:$oh" else ",scale=$ow:$oh")
+            sb.append("[v$i];")
+            if (vi.hasAudio) {
+                if (xf) {
+                    val len = f(plan.frames[i] / plan.fps)
+                    sb.append("[0:a]atrim=start=$a:end=$b,asetpts=PTS-STARTPTS,apad=whole_dur=$len,atrim=end=$len,asetpts=PTS-STARTPTS[a$i];")
+                } else {
+                    // Короткое затухание на стыках, чтобы не было щелчков
+                    val d = r.length
+                    val fade = if (d > 0.1) ",afade=t=in:st=0:d=0.012,afade=t=out:st=${f(d - 0.012)}:d=0.012" else ""
+                    sb.append("[0:a]atrim=start=$a:end=$b,asetpts=PTS-STARTPTS$fade[a$i];")
+                }
+            }
         }
-        for (i in batch.indices) {
-            sb.append("[v$i]")
-            if (vi.hasAudio) sb.append("[a$i]")
+        var vl = "v0"
+        var al = "a0"
+        if (xf) {
+            for (k in 1 until batch.size) {
+                val ov = String.format(Locale.US, "%.4f", plan.overlap[k] / plan.fps)
+                val off = String.format(Locale.US, "%.4f", plan.offsets[k] / plan.fps)
+                sb.append("[$vl][v$k]xfade=transition=${xfadeName(tr, base + k)}:duration=$ov:offset=$off[xv$k];")
+                vl = "xv$k"
+                if (vi.hasAudio) {
+                    sb.append("[$al][a$k]acrossfade=d=$ov:c1=tri:c2=tri[xa$k];")
+                    al = "xa$k"
+                }
+            }
+        } else {
+            for (i in batch.indices) {
+                sb.append("[v$i]")
+                if (vi.hasAudio) sb.append("[a$i]")
+            }
+            sb.append("concat=n=${batch.size}:v=1:a=${if (vi.hasAudio) 1 else 0}[cv]")
+            if (vi.hasAudio) sb.append("[ca]")
+            sb.append(";")
+            vl = "cv"
+            al = "ca"
         }
-        sb.append("concat=n=${batch.size}:v=1:a=${if (vi.hasAudio) 1 else 0}[vc]")
-        if (vi.hasAudio) sb.append("[ac]")
-        val scale = if (opt.maxHeight > 0 && vi.height > opt.maxHeight) "scale=-2:${opt.maxHeight}" else "null"
-        sb.append(";[vc]$scale[vs]")
+        val scale = if (!zoom && opt.maxHeight > 0 && vi.height > opt.maxHeight) "scale=-2:${opt.maxHeight}" else "null"
+        sb.append("[$vl]$scale[vs]")
         if (ass != null) sb.append(";[vs]ass=filename=$ass:fontsdir=$FONT_DIR[vo]") else sb.append(";[vs]null[vo]")
-        if (vi.hasAudio) sb.append(";[ac]anull[ao]")
+        if (vi.hasAudio) sb.append(";[$al]anull[ao]")
         val audio = if (vi.hasAudio) " -map ${q("[ao]")} -c:a aac -b:a 128k" else ""
         return "ffmpeg -y -nostdin -hide_banner -nostats -progress pipe:1 -ss ${f(w0)} -t ${f(w1 - w0)} -i ${q(vi.rel)} " +
             "-filter_complex ${q(sb.toString())} -map ${q("[vo]")}$audio " +
@@ -682,6 +750,39 @@ class VideoPipeline(
                 analysis = null
             }
             val out = doRender(vi, keep, opt, subs, tr, cut)
+            "Готово: $out. $resultNote"
+        }
+
+    /** Кэш редактора: правки не пропадают, если выйти с экрана и вернуться. */
+    private var editCache: Pair<Transcript, TextEdit>? = null
+
+    /** Редактор по тексту для текущего видео, если речь уже распознана. */
+    fun textEdit(): TextEdit? {
+        val tr = transcript ?: return null
+        val vi = info ?: return null
+        if (transcriptRel != vi.rel) return null
+        editCache?.let { if (it.first === tr) return it.second }
+        return TextEdit(tr, vi.duration).also { editCache = tr to it }
+    }
+
+    /** Путь файла проекта на устройстве (для встроенного плеера). */
+    fun absPath(rel: String): String = File(root(), rel).absolutePath
+
+    fun cutRangesUi(rel: String, cuts: List<TimeRange>, opt: VideoOptions, subs: SubStyle?, lang: String) =
+        launch { cutRanges(rel, cuts, opt, subs, lang) }
+
+    /**
+     * Вырезает указанные куски исходного видео (в секундах), при необходимости вшивает субтитры.
+     * Используется редактором по тексту и агентом.
+     */
+    suspend fun cutRanges(rel: String, cuts: List<TimeRange>, opt: VideoOptions, subs: SubStyle?, lang: String): String =
+        guarded(VideoStage.TOOLS) {
+            if (cuts.isEmpty() && subs == null) throw IllegalStateException("Нечего вырезать: список кусков пуст")
+            val tr = if (subs == null) null else (transcript?.takeIf { transcriptRel == rel } ?: doTranscribe(rel, lang))
+            val cur = info
+            val vi = if (cur != null && cur.rel == rel) { ensureTools(); cur } else doOpen(rel)
+            val keep = rangesKeep(cuts, vi.duration)
+            val out = doRender(vi, keep, opt, subs, tr, cuts.isNotEmpty())
             "Готово: $out. $resultNote"
         }
 
@@ -844,6 +945,7 @@ class VideoPipeline(
         val ROTATE_TAG = Regex("rotate\\s*:\\s*(-?\\d+)")
         const val CHUNK = 600
         const val FONT_DIR = "/usr/share/fonts/dejavu"
+        val VIDEO_FPS = Regex("Video:[^\\n]*?,\\s*(\\d+(?:\\.\\d+)?)\\s*fps")
         val VIDEO_SIZE = Regex("Video:.*?,\\s*(\\d{2,5})x(\\d{2,5})")
         val SIL_START = Regex("silence_start:\\s*(-?\\d+(?:\\.\\d+)?)")
         val SIL_END = Regex("silence_end:\\s*(-?\\d+(?:\\.\\d+)?)")

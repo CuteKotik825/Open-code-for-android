@@ -41,6 +41,9 @@ class VideoTool(private val pipeline: VideoPipeline) : Tool {
     }
 }
 
+private const val TRANSITION_HELP =
+    "Переход между кусками: zoom (по умолчанию, чередующееся приближение), cut (резкий), fade (наплыв), flash (вспышка), slide (сдвиг), blur (размытие), circle (круг), mix (разные)"
+
 private fun JsonObject.cleanPath(): String {
     val p = need("path").trim().trimStart('/')
     require(!p.contains("..")) { "Путь не должен содержать «..»" }
@@ -80,26 +83,61 @@ class VideoSubtitlesTool(private val pipeline: VideoPipeline) : Tool {
             "Результат сохраняется рядом как *_sub.mp4 (или *_cut_sub.mp4) и файл .srt, оригинал не меняется. Нужны среда Linux и ключ распознавания в разделе «Видео»."
     override val schema = objSchema(
         Prop("path", "string", "Путь к видео относительно папки проекта"),
-        Prop("style", "string", "classic — белый текст внизу фразами; pop — крупно по 2–3 слова с подсветкой слова (по умолчанию classic)", required = false),
+        Prop("style", "string", "Стиль: classic (белый текст), box (на плашке), karaoke (слово закрашивается), pop (по 2–3 слова, выскакивают), big (по одному слову во весь экран), neon (светящийся), comic (комикс). По умолчанию classic", required = false),
         Prop("language", "string", "Код языка речи (ru, en…); пусто — автоматически", required = false),
         Prop("cut_pauses", "boolean", "Заодно вырезать паузы (по умолчанию false)", required = false),
         Prop("min_silence", "number", "Минимальная длина паузы в секундах при cut_pauses (по умолчанию 0.6)", required = false),
         Prop("noise_db", "integer", "Порог тишины в дБ, от -60 до -20 (по умолчанию -35)", required = false),
+        Prop("transition", "string", TRANSITION_HELP, required = false),
     )
 
     override fun needsApproval(input: JsonObject) = true
     override fun describe(input: JsonObject) = "субтитры: ${input.str("path") ?: ""}"
 
     override suspend fun run(input: JsonObject): String {
-        val style = if (input.str("style")?.trim()?.lowercase() == "pop") SubStyle.POP else SubStyle.CLASSIC
+        val style = styleByName(input.str("style"))
         return pipeline.produce(
             input.cleanPath(),
             input.bool("cut_pauses") == true,
             (input.number("min_silence") ?: 0.6).coerceIn(0.2, 10.0),
             (input.int("noise_db") ?: -35).coerceIn(-60, -20),
-            VideoOptions(),
+            VideoOptions(transition = transitionByName(input.str("transition"))),
             style,
             input.str("language")?.trim().orEmpty(),
         )
+    }
+}
+
+/** Вырезать указанные куски видео по секундам (агент сам решает по тексту, что убрать). */
+class VideoCutRangesTool(private val pipeline: VideoPipeline) : Tool {
+    override val name = "video_cut_ranges"
+    override val description =
+        "Вырезать из видео указанные куски по времени (в секундах исходного видео) и сохранить результат как *_cut.mp4. " +
+            "Типичный порядок: video_transcribe, затем выбрать, что убрать (ошибки, повторы, слова-паразиты, лишние дубли), затем этот инструмент. " +
+            "Можно сразу вшить субтитры (subtitles=true). Оригинал не меняется."
+    override val schema = objSchema(
+        Prop("path", "string", "Путь к видео относительно папки проекта"),
+        Prop("ranges", "string", "Что вырезать: куски через запятую в секундах, например \"12.5-14.2, 40-41.8\""),
+        Prop("subtitles", "boolean", "Вшить субтитры (по умолчанию false)", required = false),
+        Prop("style", "string", "Стиль субтитров, если subtitles=true: classic, box, karaoke, pop, big, neon, comic", required = false),
+        Prop("transition", "string", TRANSITION_HELP, required = false),
+        Prop("language", "string", "Код языка речи для субтитров (ru, en…)", required = false),
+    )
+
+    override fun needsApproval(input: JsonObject) = true
+    override fun describe(input: JsonObject) = "вырезать куски: ${input.str("path") ?: ""}"
+
+    override suspend fun run(input: JsonObject): String {
+        val rx = Regex("(\\d+(?:[.,]\\d+)?)\\s*[-–—]\\s*(\\d+(?:[.,]\\d+)?)")
+        val cuts = rx.findAll(input.need("ranges")).mapNotNull { m ->
+            val a = m.groupValues[1].replace(',', '.').toDoubleOrNull()
+            val b = m.groupValues[2].replace(',', '.').toDoubleOrNull()
+            if (a != null && b != null && b > a) TimeRange(a, b) else null
+        }.toList()
+        require(cuts.isNotEmpty()) { "Не нашёл ни одного куска в формате «начало-конец» в секундах, например 12.5-14.2" }
+        val subs = if (input.bool("subtitles") == true) {
+            styleByName(input.str("style"))
+        } else null
+        return pipeline.cutRanges(input.cleanPath(), cuts, VideoOptions(transition = transitionByName(input.str("transition"))), subs, input.str("language")?.trim().orEmpty())
     }
 }

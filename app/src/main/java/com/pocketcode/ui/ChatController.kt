@@ -88,6 +88,7 @@ import com.pocketcode.service.Notifier
 import com.pocketcode.video.DEFAULT_STT_MODEL
 import com.pocketcode.video.DEFAULT_STT_URL
 import com.pocketcode.video.SpeechConfig
+import com.pocketcode.video.VideoCutRangesTool
 import com.pocketcode.video.VideoPipeline
 import com.pocketcode.video.VideoSubtitlesTool
 import com.pocketcode.video.VideoTranscribeTool
@@ -4366,6 +4367,7 @@ class ChatController(
             if (linuxActive) VideoTool(video) else null,
             if (linuxActive) VideoTranscribeTool(video) else null,
             if (linuxActive) VideoSubtitlesTool(video) else null,
+            if (linuxActive) VideoCutRangesTool(video) else null,
             if (rootEnabled) RootTool(workspace, rootShell) else null,
         )
         val sysPrompt = systemPrompt(

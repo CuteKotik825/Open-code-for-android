@@ -1,13 +1,30 @@
 package com.pocketcode.video
 
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 enum class SubStyle(val label: String, val about: String) {
-    CLASSIC("Классика", "Белый текст с обводкой внизу, по фразам"),
-    POP("Динамичные", "Крупно, по 2–3 слова, произносимое слово подсвечено"),
+    CLASSIC("Классика", "Белый текст с обводкой, фраза целиком"),
+    BOX("Плашка", "Текст на тёмной полупрозрачной плашке, фраза целиком"),
+    KARAOKE("Караоке", "Фраза целиком, произносимое слово закрашивается жёлтым"),
+    POP("Поп", "2–3 слова: слова выскакивают по очереди с «прыжком», текущее жёлтое"),
+    BIG("Громко", "По одному слову на весь экран, цвет меняется, слово «выпрыгивает»"),
+    NEON("Неон", "Светящийся розовый и голубой текст, 2–3 слова"),
+    COMIC("Комикс", "Жёлтые буквы с толстой чёрной обводкой, наклон и «удар»"),
+}
+
+/** Стиль по имени (для агента); неизвестное имя даёт «Классику». */
+fun styleByName(s: String?): SubStyle = when (s?.trim()?.lowercase()) {
+    "box", "плашка" -> SubStyle.BOX
+    "karaoke", "караоке" -> SubStyle.KARAOKE
+    "pop", "поп", "динамичные" -> SubStyle.POP
+    "big", "громко" -> SubStyle.BIG
+    "neon", "неон" -> SubStyle.NEON
+    "comic", "комикс" -> SubStyle.COMIC
+    else -> SubStyle.CLASSIC
 }
 
 data class PhraseWord(val text: String, val start: Double, val end: Double)
@@ -18,17 +35,29 @@ data class Phrase(val start: Double, val end: Double, val words: List<PhraseWord
 }
 
 object Subtitles {
+    private class Rule(val maxWords: Int, val maxChars: Int, val maxSpan: Double, val sentence: Boolean, val sentenceMin: Int, val hold: Double, val minShow: Double)
+
+    private fun rule(s: SubStyle) = when (s) {
+        SubStyle.CLASSIC, SubStyle.BOX -> Rule(99, 70, 5.0, true, 24, 0.25, 0.3)
+        SubStyle.KARAOKE -> Rule(6, 38, 4.0, true, 0, 0.15, 0.3)
+        SubStyle.POP, SubStyle.NEON -> Rule(3, 26, 3.0, true, 0, 0.05, 0.3)
+        SubStyle.COMIC -> Rule(4, 30, 3.0, true, 0, 0.1, 0.3)
+        SubStyle.BIG -> Rule(1, 40, 2.0, false, 0, 0.0, 0.12)
+    }
+
     /**
      * Раскладывает распознанные слова по готовому видео: слова из вырезанных кусков пропадают,
      * остальные сдвигаются. Надпись никогда не пересекает место склейки.
      * [keep] — оставляемые куски исходного видео по порядку (для видео без монтажа это один кусок на всё видео).
+     * [starts] — где в готовом видео начинается каждый кусок; если не задано, куски идут встык.
      */
-    fun build(tr: Transcript, keep: List<TimeRange>, style: SubStyle): List<Phrase> {
+    fun build(tr: Transcript, keep: List<TimeRange>, style: SubStyle, starts: DoubleArray? = null): List<Phrase> {
         if (keep.isEmpty()) return emptyList()
-        val src = if (tr.words.isNotEmpty()) tr.words else estimateWords(tr.segments)
+        val rule = rule(style)
+        val src = wordsOf(tr)
         val prefix = DoubleArray(keep.size)
         var acc = 0.0
-        for (i in keep.indices) { prefix[i] = acc; acc += keep[i].length }
+        for (i in keep.indices) { prefix[i] = starts?.get(i) ?: acc; acc += keep[i].length }
 
         class W(val idx: Int, val w: PhraseWord)
         val mapped = ArrayList<W>()
@@ -57,10 +86,10 @@ object Subtitles {
                 val span = m.w.end - cur.first().start
                 val brk = m.idx != curIdx ||
                     m.w.start - prev.end > 0.7 ||
-                    when (style) {
-                        SubStyle.CLASSIC -> chars > 70 || span > 5.0 || (endsSentence(prev.text) && chars > 24)
-                        SubStyle.POP -> cur.size >= 3 || chars > 26 || endsSentence(prev.text)
-                    }
+                    cur.size >= rule.maxWords ||
+                    chars > rule.maxChars ||
+                    span > rule.maxSpan ||
+                    (rule.sentence && endsSentence(prev.text) && chars > rule.sentenceMin)
                 if (brk) flush()
             }
             curIdx = m.idx
@@ -68,24 +97,23 @@ object Subtitles {
         }
         flush()
 
-        // Чтобы классические надписи не мигали между близкими фразами, держим фразу до начала следующей
+        // Держим надпись чуть дольше слова, но не дольше начала следующей: без мигания и без наложения
         return out.mapIndexed { i, p ->
             val next = out.getOrNull(i + 1)
-            var end = p.end
-            if (style == SubStyle.CLASSIC) {
-                end = p.end + 0.25
-                if (next != null) end = min(end, max(next.start, p.end))
-            } else {
-                end = p.end + 0.05
-                if (next != null) end = min(end, max(next.start, p.end))
-            }
-            Phrase(p.start, max(end, p.start + 0.3), p.words)
+            var end = p.end + rule.hold
+            if (next != null) end = min(end, max(next.start, p.end))
+            val floor = p.start + rule.minShow
+            end = max(end, if (next != null) min(floor, max(next.start, p.end)) else floor)
+            Phrase(p.start, end, p.words)
         }
     }
 
     private fun clean(s: String) = s.replace('\n', ' ').replace("\\", "").replace("{", "(").replace("}", ")").trim()
 
     private fun endsSentence(s: String) = s.trimEnd('"', '»', ')').lastOrNull() in setOf('.', '!', '?', '…')
+
+    /** Слова с временем: от сервиса, а если их нет, то оценённые по фразам. */
+    fun wordsOf(tr: Transcript): List<Word> = if (tr.words.isNotEmpty()) tr.words else estimateWords(tr.segments)
 
     /** Если сервис не вернул слова: делим время фразы между словами пропорционально их длине. */
     private fun estimateWords(segs: List<Segment>): List<Word> {
@@ -132,45 +160,118 @@ object Subtitles {
         if (text.length <= 34) return text
         val mid = text.length / 2
         var best = -1
-        for (i in text.indices) if (text[i] == ' ' && (best < 0 || kotlin.math.abs(i - mid) < kotlin.math.abs(best - mid))) best = i
+        for (i in text.indices) if (text[i] == ' ' && (best < 0 || abs(i - mid) < abs(best - mid))) best = i
         return if (best < 0) text else text.substring(0, best) + "\n" + text.substring(best + 1)
     }
+
+    private fun wrapAss(text: String) = wrap(text).replace("\n", "\\N")
+
+    private class Spec(
+        val fs: Int, val primary: String, val secondary: String, val outlineColor: String, val backColor: String,
+        val outline: Double, val shadow: Double, val border: Int, val align: Int, val mv: Int,
+    )
+
+    // Цвета: в стиле формат &HAABBGGRR, в тегах \c и \3c формат &HBBGGRR&
+    private const val YELLOW_STYLE = "&H0000F0FF"
+    private const val YELLOW = "&H00F0FF&"
+    private const val WHITE = "&HFFFFFF&"
+    private val BIG_COLORS = listOf("&HFFFFFF&", "&H00F0FF&", "&H50E850&", "&HB450FF&")
+
+    private fun spec(style: SubStyle, w: Int, h: Int): Spec {
+        val base = min(w, h).coerceAtLeast(240)
+        val portrait = h > w
+        fun mv(p: Double, l: Double) = (h * if (portrait) p else l).roundToInt()
+        fun fs(f: Double) = (base * f).roundToInt()
+        return when (style) {
+            SubStyle.CLASSIC -> fs(0.052).let { Spec(it, "&H00FFFFFF", "&H00FFFFFF", "&H00000000", "&H64000000", it * 0.07, 1.0, 1, 2, mv(0.10, 0.07)) }
+            SubStyle.BOX -> fs(0.05).let { Spec(it, "&H00FFFFFF", "&H00FFFFFF", "&H8C000000", "&H8C000000", it * 0.30, 0.0, 3, 2, mv(0.11, 0.08)) }
+            SubStyle.KARAOKE -> fs(0.058).let { Spec(it, YELLOW_STYLE, "&H00FFFFFF", "&H00000000", "&H64000000", it * 0.08, 1.0, 1, 2, mv(0.16, 0.08)) }
+            SubStyle.POP -> fs(0.085).let { Spec(it, "&H00FFFFFF", "&H00FFFFFF", "&H00000000", "&H64000000", it * 0.10, 2.0, 1, 2, mv(0.20, 0.10)) }
+            SubStyle.BIG -> fs(0.13).let { Spec(it, "&H00FFFFFF", "&H00FFFFFF", "&H00000000", "&H64000000", it * 0.09, 3.0, 1, 5, 0) }
+            SubStyle.NEON -> fs(0.065).let { Spec(it, "&H00FFFFFF", "&H00FFFFFF", "&H00FF40FF", "&H64000000", it * 0.03, 0.0, 1, 2, mv(0.16, 0.09)) }
+            SubStyle.COMIC -> fs(0.09).let { Spec(it, YELLOW_STYLE, "&H0000F0FF", "&H00000000", "&H96000000", it * 0.15, 4.0, 1, 2, mv(0.22, 0.10)) }
+        }
+    }
+
+    private fun tidy(s: String) = s.trimEnd(',', '.', ';', ':')
 
     /**
      * ASS для вшивания через ffmpeg. [w] и [h] — размер готового кадра, поэтому масштабирования шрифта нет.
      * [shift] вычитается из времён (для частей, которые рендерятся отдельно).
      */
     fun ass(phrases: List<Phrase>, style: SubStyle, w: Int, h: Int, shift: Double): String {
-        val base = min(w, h).coerceAtLeast(240)
-        val portrait = h > w
-        val pop = style == SubStyle.POP
-        val fs = (base * if (pop) 0.08 else 0.052).roundToInt()
-        val outline = max(2.0, fs * if (pop) 0.09 else 0.07)
-        val shadow = if (pop) 2 else 1
+        val sp = spec(style, w, h)
         val mx = (w * 0.06).roundToInt()
-        val mv = (h * if (pop) (if (portrait) 0.20 else 0.10) else (if (portrait) 0.10 else 0.07)).roundToInt()
-        // Цвета в формате &HAABBGGRR: у «динамичных» произнесённое слово жёлтое, остальное белое
-        val primary = if (pop) "&H0000F0FF" else "&H00FFFFFF"
-        val secondary = "&H00FFFFFF"
         val sb = StringBuilder()
         sb.append("[Script Info]\nScriptType: v4.00+\nPlayResX: $w\nPlayResY: $h\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n")
         sb.append("[V4+ Styles]\n")
         sb.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
-        sb.append("Style: Default,DejaVu Sans,$fs,$primary,$secondary,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,${String.format(Locale.US, "%.1f", outline)},$shadow,2,$mx,$mx,$mv,1\n\n")
+        sb.append("Style: Default,DejaVu Sans,${sp.fs},${sp.primary},${sp.secondary},${sp.outlineColor},${sp.backColor},-1,0,0,0,100,100,0,0,${sp.border},${String.format(Locale.US, "%.1f", sp.outline)},${String.format(Locale.US, "%.1f", sp.shadow)},${sp.align},$mx,$mx,${sp.mv},1\n\n")
         sb.append("[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
-        for (p in phrases) {
+
+        fun dl(layer: Int, s: Double, e: Double, text: String) {
+            if (e - s < 0.02) return
+            sb.append("Dialogue: $layer,${assTime(s)},${assTime(e)},Default,,0,0,0,,").append(text).append('\n')
+        }
+
+        for ((pi, p) in phrases.withIndex()) {
             val s = p.start - shift
             val e = p.end - shift
             if (e <= 0.0) continue
-            val text = if (pop) {
-                val ws = p.words
-                ws.withIndex().joinToString(" ") { (i, w0) ->
-                    val until = if (i + 1 < ws.size) ws[i + 1].start else p.end
-                    val k = ((until - w0.start) * 100).roundToInt().coerceAtLeast(1)
-                    "{\\k$k}" + w0.text.trimEnd(',', '.', ';', ':').uppercase()
+            val ws = p.words
+            when (style) {
+                SubStyle.CLASSIC, SubStyle.BOX -> dl(0, s, e, "{\\fad(90,90)}" + wrapAss(p.text))
+
+                SubStyle.KARAOKE -> {
+                    val total = ws.sumOf { it.text.length + 1 }
+                    var acc = 0
+                    var br = -1
+                    if (total > 32) for ((i, x) in ws.withIndex()) { acc += x.text.length + 1; if (acc >= total / 2 && br < 0) br = i }
+                    val text = ws.withIndex().joinToString("") { (i, x) ->
+                        val until = if (i + 1 < ws.size) ws[i + 1].start else p.end
+                        val k = ((until - x.start) * 100).roundToInt().coerceAtLeast(1)
+                        "{\\k$k}" + x.text + if (i == br) "\\N" else if (i < ws.lastIndex) " " else ""
+                    }
+                    dl(0, s, e, "{\\fad(60,60)}$text")
                 }
-            } else wrap(p.text).replace("\n", "\\N")
-            sb.append("Dialogue: 0,${assTime(s)},${assTime(e)},Default,,0,0,0,,").append(text).append('\n')
+
+                // Слова появляются по очереди; ещё не сказанные скрыты (но место держат), поэтому строка не «ездит»
+                SubStyle.POP -> for (k in ws.indices) {
+                    val st = if (k == 0) s else ws[k].start - shift
+                    val en = if (k + 1 < ws.size) ws[k + 1].start - shift else e
+                    val text = buildString {
+                        for ((i, x) in ws.withIndex()) {
+                            val t = tidy(x.text).uppercase()
+                            when {
+                                i < k -> append(t)
+                                i == k -> append("{\\c$YELLOW\\fscx82\\fscy82\\t(0,90,\\fscx118\\fscy118)\\t(90,190,\\fscx100\\fscy100)}$t{\\r}")
+                                else -> append("{\\alpha&HFF&}$t{\\alpha&H00&}")
+                            }
+                            if (i < ws.lastIndex) append(' ')
+                        }
+                    }
+                    dl(0, st, en, text)
+                }
+
+                SubStyle.BIG -> {
+                    val x = tidy(ws.first().text).uppercase()
+                    val color = BIG_COLORS[pi % BIG_COLORS.size]
+                    val y = (h * if (h > w) 0.58 else 0.5).roundToInt()
+                    dl(0, s, e, "{\\an5\\pos(${w / 2},$y)\\c$color\\fscx70\\fscy70\\t(0,90,\\fscx112\\fscy112)\\t(90,170,\\fscx100\\fscy100)}$x")
+                }
+
+                SubStyle.NEON -> {
+                    val glow = if (pi % 2 == 0) "&HFF40FF&" else "&HFFE500&"
+                    val txt = wrapAss(p.text)
+                    dl(0, s, e, "{\\fad(120,120)\\bord9\\3c$glow\\c$glow\\blur12\\alpha&H30&}$txt")
+                    dl(1, s, e, "{\\fad(120,120)\\bord1.5\\3c$glow\\c$WHITE\\blur0.8}$txt")
+                }
+
+                SubStyle.COMIC -> {
+                    val txt = wrapAss(tidy(p.text).uppercase())
+                    dl(0, s, e, "{\\frz-3\\fad(30,40)\\fscx75\\fscy75\\t(0,110,\\fscx110\\fscy110)\\t(110,200,\\fscx100\\fscy100)}$txt")
+                }
+            }
         }
         return sb.toString()
     }
