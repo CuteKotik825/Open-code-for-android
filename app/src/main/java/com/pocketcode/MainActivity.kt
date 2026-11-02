@@ -39,7 +39,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Text
+import com.pocketcode.ui.Text
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -71,7 +71,7 @@ import com.pocketcode.ui.ProjectsScreen
 import com.pocketcode.ui.SessionsScreen
 import com.pocketcode.ui.SettingsScreen
 
-private enum class Screen { CHAT, SETTINGS, SESSIONS, PROJECTS, FILES, DEVICES, PLUGINS, DIAG, COMPARE, CONTEXT, TERMINAL, GIT, OCSESSIONS, REMOTE, DIFF, SEARCH, HUB_PROJECT, HUB_AGENT, HUB_MORE, FIND, ROOT, OCSETTINGS, MODELS, LINUX, UPDATE, BACKUP, VIDEO }
+private enum class Screen { CHAT, SETTINGS, SESSIONS, PROJECTS, FILES, DEVICES, PLUGINS, DIAG, COMPARE, CONTEXT, TERMINAL, GIT, OCSESSIONS, REMOTE, DIFF, SEARCH, HUB_PROJECT, HUB_AGENT, HUB_MORE, FIND, ROOT, OCSETTINGS, MODELS, LINUX, UPDATE, BACKUP, VIDEO, LANGUAGE }
 
 class MainActivity : ComponentActivity() {
     private val controller: ChatController
@@ -145,6 +145,7 @@ class MainActivity : ComponentActivity() {
     @androidx.compose.foundation.layout.ExperimentalLayoutApi
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.pocketcode.ui.I18n.init(this)
         handleIntent(intent)
         locked = lockAvailable()
         controller.resumeSyncLive()
@@ -158,6 +159,10 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             AppTheme {
+                if (!com.pocketcode.ui.I18n.chosen) {
+                    com.pocketcode.ui.LanguagePicker(first = true, onDone = {})
+                    return@AppTheme
+                }
                 val vm = pocketApp.current
                 if (locked) {
                     androidx.compose.runtime.LaunchedEffect(Unit) { askUnlock() }
@@ -278,6 +283,7 @@ class MainActivity : ComponentActivity() {
                             listOf(
                                 com.pocketcode.ui.hubHeader("Система"),
                                 com.pocketcode.ui.HubItem(Icons.Default.Settings, "Настройки", "Тема и вид, безопасность, правила, общие параметры") { openFrom(Screen.HUB_MORE, Screen.SETTINGS) },
+                                com.pocketcode.ui.HubItem(Icons.Default.Settings, "Язык интерфейса", com.pocketcode.ui.I18n.all.firstOrNull { it.code == com.pocketcode.ui.I18n.code }?.native ?: "") { openFrom(Screen.HUB_MORE, Screen.LANGUAGE) },
                                 com.pocketcode.ui.HubItem(Icons.Default.PlayArrow, "Среда Linux", "Установка мини-Linux, python, git, node", if (!pocketApp.controller.linuxInstalled && pocketApp.controller.linuxSupported) "не установлен" else null) { openFrom(Screen.HUB_MORE, Screen.LINUX) },
                                 com.pocketcode.ui.HubItem(Icons.Default.Warning, "Root и Android", "Как дать агенту данные с телефона: четыре способа", if (pocketApp.controller.hostMode == "ask") "мост вкл" else null) { openFrom(Screen.HUB_MORE, Screen.ROOT) },
                                 com.pocketcode.ui.HubItem(Icons.Default.Phone, "Устройства", "ADB, root, подключённые устройства") { openFrom(Screen.HUB_MORE, Screen.DEVICES) },
@@ -444,6 +450,10 @@ class MainActivity : ComponentActivity() {
                         BackHandler { screen = backTo }
                         com.pocketcode.video.VideoScreen(vm.video, onBack = { screen = backTo }, onOpenLinux = { openFrom(Screen.HUB_PROJECT, Screen.LINUX) }, onAsk = { prompt -> screen = Screen.CHAT; vm.send(prompt) })
                     }
+                    Screen.LANGUAGE -> {
+                        BackHandler { screen = backTo }
+                        com.pocketcode.ui.LanguagePicker(first = false, onDone = { screen = backTo })
+                    }
                     Screen.LINUX -> {
                         BackHandler { screen = backTo }
                         com.pocketcode.ui.LinuxScreen(pocketApp.controller, onBack = { screen = backTo })
@@ -558,7 +568,10 @@ private fun AppTheme(content: @Composable () -> Unit) {
         d.density * (if (st.compactUi) 0.9f else 1f),
         d.fontScale * st.fontScale,
     )
-    androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides dens) {
+    androidx.compose.runtime.CompositionLocalProvider(
+        androidx.compose.ui.platform.LocalDensity provides dens,
+        androidx.compose.ui.platform.LocalLayoutDirection provides if (com.pocketcode.ui.I18n.isRtl) androidx.compose.ui.unit.LayoutDirection.Rtl else androidx.compose.ui.unit.LayoutDirection.Ltr,
+    ) {
         MaterialTheme(
             colorScheme = scheme,
             typography = com.pocketcode.ui.AppTypography,
