@@ -41,6 +41,9 @@ class VideoTool(private val pipeline: VideoPipeline) : Tool {
     }
 }
 
+private const val ENHANCE_HELP = "true — улучшить звук: убрать шум и гул, выровнять громкость (по умолчанию false)"
+private const val BLUR_HELP = "true — при shorts=true вместо обрезки вписать кадр целиком на размытом фоне"
+
 private const val SHORTS_HELP = "true — вертикальный ролик 9:16 для Shorts/Reels/TikTok (кадр обрезается по центру)"
 
 private const val TRANSITION_HELP =
@@ -92,6 +95,8 @@ class VideoSubtitlesTool(private val pipeline: VideoPipeline) : Tool {
         Prop("noise_db", "integer", "Порог тишины в дБ, от -60 до -20 (по умолчанию -35)", required = false),
         Prop("transition", "string", TRANSITION_HELP, required = false),
         Prop("shorts", "boolean", SHORTS_HELP, required = false),
+        Prop("enhance_audio", "boolean", ENHANCE_HELP, required = false),
+        Prop("blur_background", "boolean", BLUR_HELP, required = false),
     )
 
     override fun needsApproval(input: JsonObject) = true
@@ -104,7 +109,7 @@ class VideoSubtitlesTool(private val pipeline: VideoPipeline) : Tool {
             input.bool("cut_pauses") == true,
             (input.number("min_silence") ?: 0.6).coerceIn(0.2, 10.0),
             (input.int("noise_db") ?: -35).coerceIn(-60, -20),
-            VideoOptions(transition = transitionByName(input.str("transition")), vertical = input.bool("shorts") == true),
+            VideoOptions(transition = transitionByName(input.str("transition")), vertical = input.bool("shorts") == true, enhanceAudio = input.bool("enhance_audio") == true, blurBg = input.bool("blur_background") == true),
             style,
             input.str("language")?.trim().orEmpty(),
         )
@@ -126,6 +131,8 @@ class VideoCutRangesTool(private val pipeline: VideoPipeline) : Tool {
         Prop("transition", "string", TRANSITION_HELP, required = false),
         Prop("language", "string", "Код языка речи для субтитров (ru, en…)", required = false),
         Prop("shorts", "boolean", SHORTS_HELP, required = false),
+        Prop("enhance_audio", "boolean", ENHANCE_HELP, required = false),
+        Prop("blur_background", "boolean", BLUR_HELP, required = false),
     )
 
     override fun needsApproval(input: JsonObject) = true
@@ -142,6 +149,6 @@ class VideoCutRangesTool(private val pipeline: VideoPipeline) : Tool {
         val subs = if (input.bool("subtitles") == true) {
             styleByName(input.str("style"))
         } else null
-        return pipeline.cutRanges(input.cleanPath(), cuts, VideoOptions(transition = transitionByName(input.str("transition")), vertical = input.bool("shorts") == true), subs, input.str("language")?.trim().orEmpty())
+        return pipeline.cutRanges(input.cleanPath(), cuts, VideoOptions(transition = transitionByName(input.str("transition")), vertical = input.bool("shorts") == true, enhanceAudio = input.bool("enhance_audio") == true, blurBg = input.bool("blur_background") == true), subs, input.str("language")?.trim().orEmpty())
     }
 }

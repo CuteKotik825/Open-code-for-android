@@ -36,7 +36,7 @@ enum class VideoQuality(val label: String, val preset: String, val crf: Int) {
     HIGH("Качество", "faster", 20),
 }
 
-data class VideoOptions(val quality: VideoQuality = VideoQuality.BALANCED, val maxHeight: Int = 0, val transition: Transition = Transition.ZOOM, val vertical: Boolean = false)
+data class VideoOptions(val quality: VideoQuality = VideoQuality.BALANCED, val maxHeight: Int = 0, val transition: Transition = Transition.ZOOM, val vertical: Boolean = false, val enhanceAudio: Boolean = false, val blurBg: Boolean = false)
 
 data class TimeRange(val start: Double, val end: Double) {
     val length: Double get() = end - start
@@ -549,7 +549,8 @@ class VideoPipeline(
         val tr = opt.transition
         val xf = tr.xfade != null && batch.size > 1
         val (ow, oh) = outSize(vi, opt)
-        val zoom = tr.zoom && ow % 2 == 0 && oh % 2 == 0
+        val blurFit = opt.vertical && opt.blurBg
+        val zoom = tr.zoom && ow % 2 == 0 && oh % 2 == 0 && !blurFit
         val zw = (ow * 1.12).toInt() and 1.inv()
         val zh = (oh * 1.12).toInt() and 1.inv()
         val fps = String.format(Locale.US, "%.3f", plan.fps)
@@ -603,9 +604,11 @@ class VideoPipeline(
             opt.maxHeight > 0 && vi.height > opt.maxHeight -> "scale=-2:${opt.maxHeight}"
             else -> "null"
         }
-        sb.append("[$vl]$scale[vs]")
+        if (blurFit) sb.append("[$vl]split[bg0][fg0];[bg0]scale=$ow:$oh:force_original_aspect_ratio=increase,crop=$ow:$oh,boxblur=20:2[bg1];" +
+            "[fg0]scale=$ow:$oh:force_original_aspect_ratio=decrease[fg1];[bg1][fg1]overlay=(W-w)/2:(H-h)/2[vs]")
+        else sb.append("[$vl]$scale[vs]")
         if (ass != null) sb.append(";[vs]ass=filename=$ass:fontsdir=$FONT_DIR[vo]") else sb.append(";[vs]null[vo]")
-        if (vi.hasAudio) sb.append(";[$al]anull[ao]")
+        if (vi.hasAudio) sb.append(";[$al]" + (if (opt.enhanceAudio) "highpass=f=80,afftdn=nf=-28,acompressor=threshold=-21dB:ratio=3:attack=5:release=80,loudnorm=I=-16:TP=-1.5:LRA=11" else "anull") + "[ao]")
         val audio = if (vi.hasAudio) " -map ${q("[ao]")} -c:a aac -b:a 128k" else ""
         return "ffmpeg -y -nostdin -hide_banner -nostats -progress pipe:1 -ss ${f(w0)} -t ${f(w1 - w0)} -i ${q(vi.rel)} " +
             "-filter_complex ${q(sb.toString())} -map ${q("[vo]")}$audio " +

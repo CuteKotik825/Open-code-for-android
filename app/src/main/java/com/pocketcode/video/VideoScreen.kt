@@ -73,6 +73,8 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit, o
     var small by remember { mutableStateOf(false) }
     var transition by remember { mutableStateOf(Transition.ZOOM) }
     var shorts by remember { mutableStateOf(false) }
+    var enhance by remember { mutableStateOf(false) }
+    var blurBg by remember { mutableStateOf(true) }
     var editing by remember { mutableStateOf(false) }
     var withPauses by remember { mutableStateOf(false) }
     var doCut by remember { mutableStateOf(true) }
@@ -84,7 +86,7 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit, o
 
     val info = v.info
     val a = v.analysis
-    val opt = VideoOptions(quality, if (small) 720 else 0, transition, shorts)
+    val opt = VideoOptions(quality, if (small) 720 else 0, transition, shorts, enhance, blurBg)
 
     fun start(rel: String, cut: Boolean, subs: SubStyle?) {
         note = null
@@ -229,17 +231,25 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit, o
                             }
                             FilterChip(selected = small, enabled = !v.busy, onClick = { small = !small }, label = { Text("Сжать до 720p") })
                             FilterChip(selected = shorts, enabled = !v.busy, onClick = { shorts = !shorts }, label = { Text("Shorts 9:16") })
+                            FilterChip(selected = enhance, enabled = !v.busy, onClick = { enhance = !enhance }, label = { Text("Улучшить звук") })
                         }
                     }
 
-                    if (shorts) Text("Shorts: кадр станет вертикальным 9:16 (обрезка по центру).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (shorts) {
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(selected = blurBg, enabled = !v.busy, onClick = { blurBg = true }, label = { Text("Размытый фон") })
+                            FilterChip(selected = !blurBg, enabled = !v.busy, onClick = { blurBg = false }, label = { Text("Обрезка по центру") })
+                        }
+                        Text("Shorts: вертикальный кадр 9:16. " + if (blurBg) "Видео целиком, по краям размытый фон." else "Кадр обрезается по центру.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (enhance) Text("Звук: уберём шум и гул, выровняем громкость до уровня соцсетей.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     OutlinedButton(enabled = !v.busy, onClick = {
                         val styleName = if (doSubs) subStyle.name.lowercase() else "pop"
                         onAsk(
                             "Смонтируй видео ${info.rel} как короткий динамичный ролик: распознай речь (video_transcribe), " +
                                 "найди и вырежи ошибки, дубли, повторы, слова-паразиты и долгое молчание, оставь лучшие дубли. " +
                                 "Потом вызови video_cut_ranges с subtitles=true, style=$styleName, transition=${transition.name.lowercase()}" +
-                                (if (shorts) ", shorts=true" else "") + ". Перед вырезанием коротко перечисли, что убираешь."
+                                (if (shorts) ", shorts=true" + (if (blurBg) ", blur_background=true" else "") else "") + (if (enhance) ", enhance_audio=true" else "") + ". Перед вырезанием коротко перечисли, что убираешь."
                         )
                     }) { Text("Умный монтаж (ИИ в чате)") }
                     Button(
