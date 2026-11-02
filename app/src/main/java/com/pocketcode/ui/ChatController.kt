@@ -85,7 +85,13 @@ import com.pocketcode.linux.SwitchableShell
 import com.pocketcode.python.PythonRunner
 import com.pocketcode.service.AgentService
 import com.pocketcode.service.Notifier
+import com.pocketcode.video.DEFAULT_STT_MODEL
+import com.pocketcode.video.DEFAULT_STT_URL
+import com.pocketcode.video.SpeechConfig
 import com.pocketcode.video.VideoPipeline
+import com.pocketcode.video.VideoSubtitlesTool
+import com.pocketcode.video.VideoTranscribeTool
+import com.pocketcode.video.sameHost
 import com.pocketcode.video.VideoTool
 import com.pocketcode.session.SessionData
 import com.pocketcode.session.SessionMeta
@@ -4358,6 +4364,8 @@ class ChatController(
             WebFetchTool(),
             if (linuxActive) AdbTool(workspace, linuxShell) { devices } else null,
             if (linuxActive) VideoTool(video) else null,
+            if (linuxActive) VideoTranscribeTool(video) else null,
+            if (linuxActive) VideoSubtitlesTool(video) else null,
             if (rootEnabled) RootTool(workspace, rootShell) else null,
         )
         val sysPrompt = systemPrompt(
@@ -4435,6 +4443,21 @@ class ChatController(
             keepAlive = { videoHold = true; startService() },
             release = { videoHold = false; if (!running) stopService() },
             appVisible = { appVisible },
+            speechLoad = {
+                SpeechConfig(
+                    settingsStore.rawGet("sttUrl") ?: DEFAULT_STT_URL,
+                    settingsStore.rawGet("sttModel") ?: DEFAULT_STT_MODEL,
+                    settingsStore.rawGet("sttKey") ?: "",
+                ).also { if (it.key.isNotBlank()) Secrets.known = Secrets.known + it.key }
+            },
+            speechSave = { c ->
+                settingsStore.rawPut("sttUrl", c.baseUrl)
+                settingsStore.rawPut("sttModel", c.model)
+                settingsStore.rawPut("sttKey", c.key)
+                if (c.key.isNotBlank()) Secrets.known = Secrets.known + c.key
+            },
+            fallbackKey = { url -> profiles.firstOrNull { it.apiKey.isNotBlank() && sameHost(it.baseUrl, url) }?.let { it.apiKey to it.label } },
+            proxy = { netProxy },
         )
     }
 

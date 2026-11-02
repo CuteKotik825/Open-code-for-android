@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.ensureActive
 
-enum class VideoStage { IDLE, IMPORT, TOOLS, ANALYZE, RENDER, DONE, ERROR }
+enum class VideoStage { IDLE, IMPORT, TOOLS, ANALYZE, TRANSCRIBE, RENDER, DONE, ERROR }
 
 enum class VideoQuality(val label: String, val preset: String, val crf: Int) {
     FAST("Быстро", "ultrafast", 27),
@@ -90,6 +90,11 @@ class VideoPipeline(
     private val keepAlive: () -> Unit,
     private val release: () -> Unit,
     private val appVisible: () -> Boolean,
+    private val speechLoad: () -> SpeechConfig,
+    private val speechSave: (SpeechConfig) -> Unit,
+    /** Ключ из профиля API с тем же адресом: (ключ, название профиля). */
+    private val fallbackKey: (String) -> Pair<String, String>?,
+    private val proxy: () -> String,
 ) {
     var stage by mutableStateOf(VideoStage.IDLE)
         private set
@@ -110,11 +115,67 @@ class VideoPipeline(
     var resultNote by mutableStateOf("")
         private set
 
+    var transcript by mutableStateOf<Transcript?>(null)
+        private set
+    var transcriptRel by mutableStateOf<String?>(null)
+        private set
+
+    // Настройки распознавания речи (хранятся зашифрованно, редактируются на экране «Видео»)
+    var sttUrl by mutableStateOf(DEFAULT_STT_URL)
+        private set
+    var sttModel by mutableStateOf(DEFAULT_STT_MODEL)
+        private set
+    var sttKey by mutableStateOf("")
+        private set
+    var speechTest by mutableStateOf("")
+        private set
+
+    init {
+        val c = speechLoad()
+        sttUrl = c.baseUrl.ifBlank { DEFAULT_STT_URL }
+        sttModel = c.model.ifBlank { DEFAULT_STT_MODEL }
+        sttKey = c.key
+    }
+
+    /** Если своего ключа нет, но есть профиль API с тем же адресом (например Groq), берём ключ оттуда. */
+    val sttKeySource: String get() = if (sttKey.isNotBlank()) "" else fallbackKey(sttUrl)?.second.orEmpty()
+
+    val speechReady: Boolean get() = effectiveSpeech() != null
+
+    private fun effectiveSpeech(): SpeechConfig? {
+        val key = sttKey.trim().ifBlank { fallbackKey(sttUrl)?.first.orEmpty() }
+        if (key.isBlank()) return null
+        return SpeechConfig(sttUrl.trim().ifBlank { DEFAULT_STT_URL }, sttModel.trim().ifBlank { DEFAULT_STT_MODEL }, key)
+    }
+
+    fun saveSpeech(url: String, model: String, key: String) {
+        sttUrl = url.trim().ifBlank { DEFAULT_STT_URL }
+        sttModel = model.trim().ifBlank { DEFAULT_STT_MODEL }
+        sttKey = key.trim()
+        speechSave(SpeechConfig(sttUrl, sttModel, sttKey))
+        speechTest = ""
+    }
+
+    fun testSpeech() {
+        val cfg = effectiveSpeech()
+        if (cfg == null) { speechTest = "Сначала введите ключ"; return }
+        speechTest = "Проверяю…"
+        scope.launch {
+            speechTest = try {
+                SpeechClient(cfg, proxy()).ping()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                e.message ?: e.javaClass.simpleName
+            }
+        }
+    }
+
     /** Видео работает только в среде Linux: там есть ffmpeg. */
     val ready: Boolean get() = linuxReady()
 
     val busy: Boolean
-        get() = stage == VideoStage.IMPORT || stage == VideoStage.TOOLS || stage == VideoStage.ANALYZE || stage == VideoStage.RENDER
+        get() = stage == VideoStage.IMPORT || stage == VideoStage.TOOLS || stage == VideoStage.ANALYZE || stage == VideoStage.TRANSCRIBE || stage == VideoStage.RENDER
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var job: Job? = null
@@ -123,6 +184,8 @@ class VideoPipeline(
     private var proc: Process? = null
     private val running = AtomicBoolean(false)
     private var toolsOk = false
+    private var subsOk = false
+    private var mp3Ok = false
 
     // ---------- запуск из интерфейса ----------
 
@@ -144,6 +207,11 @@ class VideoPipeline(
 
     fun removePauses(rel: String, minSilence: Double, noiseDb: Int, opt: VideoOptions, render: Boolean) =
         launch { cutSilence(rel, minSilence, noiseDb, opt, render) }
+
+    fun transcribeUi(rel: String, lang: String) = launch { transcribe(rel, lang) }
+
+    fun produceUi(rel: String, cut: Boolean, minSilence: Double, noiseDb: Int, opt: VideoOptions, subs: SubStyle?, lang: String) =
+        launch { produce(rel, cut, minSilence, noiseDb, opt, subs, lang) }
 
     fun cancel() {
         job?.cancel()
@@ -220,7 +288,7 @@ class VideoPipeline(
                     summary(a)
                 }
                 else -> {
-                    val out = doRender(a, opt)
+                    val out = doRender(a.info, a.keep, opt, null, null, true)
                     "Готово: $out. " + resultNote
                 }
             }
@@ -230,6 +298,7 @@ class VideoPipeline(
         "Найдено пауз: ${a.cuts.size}. Вырежем ${fmtTime(a.cutSeconds)} из ${fmtTime(a.info.duration)}, останется ${fmtTime(a.resultSeconds)}."
 
     private fun resetResult() {
+        if (transcriptRel != info?.rel) transcript = null
         analysis = null
         resultRel = null
         resultNote = ""
@@ -268,12 +337,17 @@ class VideoPipeline(
         if (!text.contains(Regex("Stream #\\S+.*: Video:"))) throw IllegalStateException("В файле нет видеодорожки")
         val hasAudio = text.contains(Regex("Stream #\\S+.*: Audio:"))
         val size = VIDEO_SIZE.find(text)
+        val cw = size?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        val ch = size?.groupValues?.get(2)?.toIntOrNull() ?: 0
+        // Телефонные ролики часто хранятся «лёжа» с пометкой о повороте: ffmpeg разворачивает их сам, значит размер меняем местами
+        val rot = (ROTATION.find(text)?.groupValues?.get(1) ?: ROTATE_TAG.find(text)?.groupValues?.get(1))?.toDoubleOrNull()
+        val swap = rot != null && kotlin.math.abs(rot).toInt() % 180 == 90
         val vi = VideoInfo(
             rel = rel,
             duration = dur,
             hasAudio = hasAudio,
-            width = size?.groupValues?.get(1)?.toIntOrNull() ?: 0,
-            height = size?.groupValues?.get(2)?.toIntOrNull() ?: 0,
+            width = if (swap) ch else cw,
+            height = if (swap) cw else ch,
             bytes = File(root(), rel).length(),
         )
         info = vi
@@ -338,19 +412,35 @@ class VideoPipeline(
         return keep
     }
 
-    private suspend fun doRender(a: SilenceAnalysis, opt: VideoOptions): String {
-        if (a.keep.isEmpty()) throw IllegalStateException("После вырезания ничего не осталось: уберите чувствительность (порог ближе к −45 дБ) или удлините паузу.")
+    private fun outSize(vi: VideoInfo, opt: VideoOptions): Pair<Int, Int> {
+        if (vi.width <= 0 || vi.height <= 0) return 1280 to 720
+        if (opt.maxHeight > 0 && vi.height > opt.maxHeight) {
+            val h = opt.maxHeight
+            val w = (vi.width.toDouble() * h / vi.height).toInt() and 1.inv()
+            return w to h
+        }
+        return vi.width to vi.height
+    }
+
+    /**
+     * Собирает готовый файл: оставляет куски [keep], при необходимости вшивает субтитры.
+     * Длинные видео собираются порциями по BATCH кусков, чтобы не упереться в память.
+     */
+    private suspend fun doRender(vi: VideoInfo, keep: List<TimeRange>, opt: VideoOptions, subs: SubStyle?, tr: Transcript?, cut: Boolean): String {
+        if (keep.isEmpty()) throw IllegalStateException("После вырезания ничего не осталось: уберите чувствительность (порог ближе к −45 дБ) или удлините паузу.")
+        if (subs != null) ensureSubtitleTools()
         stage = VideoStage.RENDER
         progress = 0f
         message = "Монтаж…"
-        val vi = a.info
-        val out = uniqueOut(vi.rel)
+        val out = uniqueOut(vi.rel, (if (cut) "_cut" else "") + (if (subs != null) "_sub" else ""))
         val work = "video/.work"
         val workDir = File(root(), work)
         workDir.deleteRecursively()
         workDir.mkdirs()
-        val total = a.resultSeconds
-        val batches = a.keep.chunked(BATCH)
+        val total = keep.sumOf { it.length }
+        val phrases = if (subs != null && tr != null) Subtitles.build(tr, keep, subs) else emptyList()
+        val (ow, oh) = outSize(vi, opt)
+        val batches = keep.chunked(BATCH)
         val parts = ArrayList<String>()
         val tail = ArrayDeque<String>()
         var done = 0.0
@@ -362,7 +452,15 @@ class VideoPipeline(
                 val partDur = batch.sumOf { it.length }
                 val target = if (batches.size == 1) out else String.format(Locale.US, "%s/p%03d.mp4", work, i)
                 val startDone = done
-                val code = runStreaming(ffmpegCut(vi, batch, w0, w1, opt, target), 3 * 3600L) { line ->
+                var assRel: String? = null
+                if (subs != null) {
+                    val sel = phrases.filter { it.start >= startDone - 0.001 && it.start < startDone + partDur - 0.001 }
+                    if (sel.isNotEmpty()) {
+                        assRel = String.format(Locale.US, "%s/s%03d.ass", work, i)
+                        File(root(), assRel).writeText(Subtitles.ass(sel, subs, ow, oh, startDone))
+                    }
+                }
+                val code = runStreaming(ffmpegCut(vi, batch, w0, w1, opt, target, assRel), 3 * 3600L) { line ->
                     val t = progressSeconds(line)
                     if (t != null) {
                         val now = startDone + minOf(t, partDur)
@@ -393,12 +491,21 @@ class VideoPipeline(
             if (!f.exists() || f.length() == 0L) throw IllegalStateException("ffmpeg не создал файл результата")
             ok = true
             resultRel = out
-            resultNote = "Было ${fmtTime(vi.duration)}, стало ${fmtTime(total)}, файл ${fmtSize(f.length())}."
+            var note = "Было ${fmtTime(vi.duration)}, стало ${fmtTime(total)}, файл ${fmtSize(f.length())}."
+            if (subs != null && tr != null) {
+                val srtPhrases = Subtitles.build(tr, keep, SubStyle.CLASSIC)
+                if (srtPhrases.isNotEmpty()) {
+                    val srt = out.removeSuffix(".mp4") + ".srt"
+                    File(root(), srt).writeText(Subtitles.srt(srtPhrases))
+                    note += " Субтитры вшиты, файл ${File(srt).name} лежит рядом."
+                } else note += " Речи в этом фрагменте не нашлось, субтитров нет."
+            }
+            resultNote = note
             progress = 1f
             speed = ""
-            message = "Готово: " + resultNote
+            message = "Готово: $note"
             stage = VideoStage.DONE
-            if (!appVisible()) Notifier.alert(app, "Видео готово", File(out).name + ": " + resultNote)
+            if (!appVisible()) Notifier.alert(app, "Видео готово", File(out).name + ": " + note)
             return out
         } finally {
             workDir.deleteRecursively()
@@ -406,8 +513,8 @@ class VideoPipeline(
         }
     }
 
-    /** Один проход ffmpeg: вырезает куски batch из окна [w0, w1] и склеивает их. Окно ускоряет перемотку к нужному месту. */
-    private fun ffmpegCut(vi: VideoInfo, batch: List<TimeRange>, w0: Double, w1: Double, opt: VideoOptions, target: String): String {
+    /** Один проход ffmpeg: вырезает куски batch из окна [w0, w1], склеивает их и (если нужно) вшивает субтитры из файла [ass]. */
+    private fun ffmpegCut(vi: VideoInfo, batch: List<TimeRange>, w0: Double, w1: Double, opt: VideoOptions, target: String, ass: String?): String {
         val sb = StringBuilder()
         for ((i, r) in batch.withIndex()) {
             val a = f(r.start - w0)
@@ -422,7 +529,8 @@ class VideoPipeline(
         sb.append("concat=n=${batch.size}:v=1:a=${if (vi.hasAudio) 1 else 0}[vc]")
         if (vi.hasAudio) sb.append("[ac]")
         val scale = if (opt.maxHeight > 0 && vi.height > opt.maxHeight) "scale=-2:${opt.maxHeight}" else "null"
-        sb.append(";[vc]$scale[vo]")
+        sb.append(";[vc]$scale[vs]")
+        if (ass != null) sb.append(";[vs]ass=filename=$ass:fontsdir=$FONT_DIR[vo]") else sb.append(";[vs]null[vo]")
         if (vi.hasAudio) sb.append(";[ac]anull[ao]")
         val audio = if (vi.hasAudio) " -map ${q("[ao]")} -c:a aac -b:a 128k" else ""
         return "ffmpeg -y -nostdin -hide_banner -nostats -progress pipe:1 -ss ${f(w0)} -t ${f(w1 - w0)} -i ${q(vi.rel)} " +
@@ -430,17 +538,164 @@ class VideoPipeline(
             "-c:v libx264 -preset ${opt.quality.preset} -crf ${opt.quality.crf} -pix_fmt yuv420p -movflags +faststart ${q(target)}"
     }
 
-    private fun uniqueOut(rel: String): String {
+    private fun uniqueOut(rel: String, suffix: String): String {
         val src = File(rel)
         val dir = src.parent ?: "video"
         val base = src.nameWithoutExtension
         var n = 1
         while (true) {
-            val name = if (n == 1) "${base}_cut.mp4" else "${base}_cut$n.mp4"
+            val name = if (n == 1) "$base$suffix.mp4" else "$base$suffix$n.mp4"
             val cand = "$dir/$name"
             if (!File(root(), cand).exists()) return cand
             n++
         }
+    }
+
+    // ---------- речь и субтитры ----------
+
+    /** Проверяет, что ffmpeg умеет вшивать субтитры (фильтр ass) и что есть шрифт с кириллицей. */
+    private suspend fun ensureSubtitleTools() {
+        if (subsOk) return
+        ensureTools()
+        stage = VideoStage.TOOLS
+        message = "Проверяю шрифты для субтитров…"
+        var ass = false
+        var font = false
+        val script = "if ffmpeg -hide_banner -filters 2>/dev/null | grep -q ' ass '; then echo PC_ASS; fi; " +
+            "if ls $FONT_DIR/DejaVuSans-Bold.ttf >/dev/null 2>&1; then echo PC_FONT; else echo 'Ставлю шрифт (один раз)…'; " +
+            "apk add --no-cache font-dejavu 2>&1 | tail -n 2; ls $FONT_DIR/DejaVuSans-Bold.ttf >/dev/null 2>&1 && echo PC_FONT; fi"
+        runStreaming(script, 600) { line ->
+            if (line.contains("PC_ASS")) ass = true else if (line.contains("PC_FONT")) font = true else if (line.isNotBlank()) message = line.take(120)
+        }
+        if (!ass) throw IllegalStateException("Этот ffmpeg не умеет вшивать субтитры (нет фильтра ass). Можно получить текст и файл .srt без вшивания.")
+        if (!font) throw IllegalStateException("Не удалось поставить шрифт для субтитров. Проверьте интернет (или прокси в настройках) и повторите.")
+        subsOk = true
+    }
+
+    private suspend fun ensureSpeechTools() {
+        if (mp3Ok) return
+        ensureTools()
+        var ok = false
+        runStreaming("if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libmp3lame; then echo PC_MP3; fi", 60) { if (it.contains("PC_MP3")) ok = true }
+        if (!ok) throw IllegalStateException("В этом ffmpeg нет кодека mp3, поэтому подготовить звук для распознавания не получится.")
+        mp3Ok = true
+    }
+
+    private fun hashOf(s: String): String =
+        java.security.MessageDigest.getInstance("SHA-1").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }.take(16)
+
+    /** Достаёт звук, отправляет на распознавание кусками по 10 минут и собирает слова с отметками времени. Результат кэшируется. */
+    private suspend fun doTranscribe(rel: String, lang: String): Transcript {
+        val cfg = effectiveSpeech()
+            ?: throw IllegalStateException("Нужен ключ распознавания речи: введите его в блоке «Распознавание речи» на этом экране (подойдёт бесплатный ключ Groq).")
+        val cur = info
+        val vi = if (cur != null && cur.rel == rel) { ensureTools(); cur } else doOpen(rel)
+        if (!vi.hasAudio) throw IllegalStateException("В видео нет звука: распознавать нечего")
+        val src = File(root(), rel)
+        val cache = File(File(root(), "video/.cache").apply { mkdirs() }, hashOf("$rel|${src.length()}|${src.lastModified()}|$lang|${cfg.model}|${cfg.baseUrl}") + ".json")
+        if (cache.isFile) {
+            val cached = runCatching { Transcript.fromJson(cache.readText()) }.getOrNull()
+            if (cached != null && cached.segments.isNotEmpty()) {
+                transcript = cached
+                transcriptRel = rel
+                message = "Текст взят из сохранённого: повторно распознавать не нужно"
+                return cached
+            }
+        }
+        ensureSpeechTools()
+        stage = VideoStage.TRANSCRIBE
+        progress = 0f
+        message = "Готовлю звук…"
+        val work = File(root(), "video/.work")
+        work.deleteRecursively()
+        work.mkdirs()
+        try {
+            val tail = ArrayDeque<String>()
+            val code = runStreaming(
+                "ffmpeg -y -nostdin -hide_banner -nostats -progress pipe:1 -i ${q(rel)} -vn -ac 1 -ar 16000 -c:a libmp3lame -b:a 32k " +
+                    "-f segment -segment_time $CHUNK -reset_timestamps 1 ${q("video/.work/a%03d.mp3")}",
+                1800,
+            ) { line ->
+                val t = progressSeconds(line)
+                if (t != null) {
+                    if (vi.duration > 0) progress = (t / vi.duration * 0.2).toFloat().coerceIn(0f, 0.2f)
+                } else if (!isProgressLine(line) && line.isNotBlank()) {
+                    tail.addLast(line)
+                    if (tail.size > 8) tail.removeFirst()
+                }
+            }
+            if (code != 0) throw IllegalStateException("Не удалось извлечь звук ($code): " + tail.joinToString(" | ").take(400))
+            val chunks = (work.listFiles() ?: emptyArray()).filter { it.name.matches(Regex("a\\d{3}\\.mp3")) }.sortedBy { it.name }
+            if (chunks.isEmpty()) throw IllegalStateException("Не удалось извлечь звук: ffmpeg не создал файлов")
+            val client = SpeechClient(cfg, proxy())
+            val parts = ArrayList<Transcript>()
+            for ((i, f) in chunks.withIndex()) {
+                message = "Распознаю речь: часть ${i + 1} из ${chunks.size}"
+                progress = 0.2f + 0.8f * i / chunks.size
+                val offset = i * CHUNK.toDouble()
+                val chunkDur = minOf(CHUNK.toDouble(), vi.duration - offset).coerceAtLeast(1.0)
+                parts += client.transcribe(f, lang.takeIf { it.isNotBlank() }, offset, chunkDur)
+            }
+            val tr = mergeTranscripts(parts)
+            if (tr.segments.isEmpty()) throw IllegalStateException("Речь в видео не найдена. Если язык указан неверно, выберите другой или «Авто».")
+            runCatching { cache.writeText(tr.toJson()) }
+            transcript = tr
+            transcriptRel = rel
+            progress = 1f
+            return tr
+        } finally {
+            work.deleteRecursively()
+        }
+    }
+
+    /** Только текст: распознать и показать на экране (агенту возвращается текст с отметками времени). */
+    suspend fun transcribe(rel: String, lang: String): String = guarded(VideoStage.TOOLS) {
+        val tr = doTranscribe(rel, lang)
+        stage = VideoStage.IDLE
+        message = "Текст готов: ${tr.segments.size} фраз"
+        tr.timedText()
+    }
+
+    /**
+     * Главная операция: при необходимости вырезает паузы и/или вшивает субтитры, одним проходом кодирования.
+     * Речь распознаётся по исходному видео один раз, а потом раскладывается на смонтированную шкалу времени.
+     */
+    suspend fun produce(rel: String, cut: Boolean, minSilence: Double, noiseDb: Int, opt: VideoOptions, subs: SubStyle?, lang: String): String =
+        guarded(VideoStage.TOOLS) {
+            if (!cut && subs == null) throw IllegalStateException("Выберите, что сделать: вырезать паузы или добавить субтитры")
+            val tr = if (subs != null) doTranscribe(rel, lang) else null
+            val vi: VideoInfo
+            val keep: List<TimeRange>
+            if (cut) {
+                val a = doAnalyze(rel, minSilence, noiseDb)
+                if (a.cuts.isEmpty() && subs == null) {
+                    stage = VideoStage.IDLE
+                    message = "Пауз не найдено"
+                    return@guarded "Пауз не найдено: при минимальной паузе ${fmtSec(minSilence)} и пороге $noiseDb дБ вырезать нечего."
+                }
+                vi = a.info
+                keep = a.keep
+            } else {
+                val cur = info
+                vi = if (cur != null && cur.rel == rel) cur else doOpen(rel)
+                keep = listOf(TimeRange(0.0, vi.duration))
+                analysis = null
+            }
+            val out = doRender(vi, keep, opt, subs, tr, cut)
+            "Готово: $out. $resultNote"
+        }
+
+    /** Сохраняет текст и .srt рядом с видео. Возвращает короткий итог. */
+    fun saveTranscriptFiles(rel: String): String {
+        val tr = transcript ?: throw IllegalStateException("Сначала получите текст")
+        val dir = File(rel).parent ?: "video"
+        val base = File(rel).nameWithoutExtension
+        val txt = "$dir/$base.txt"
+        File(root(), txt).writeText(tr.timedText() + "\n")
+        val phrases = Subtitles.build(tr, listOf(TimeRange(0.0, info?.takeIf { it.rel == rel }?.duration ?: (tr.segments.maxOfOrNull { it.end } ?: 0.0) + 1.0)), SubStyle.CLASSIC)
+        val srt = "$dir/$base.srt"
+        File(root(), srt).writeText(Subtitles.srt(phrases))
+        return "$txt и $srt"
     }
 
     // ---------- файлы ----------
@@ -585,6 +840,10 @@ class VideoPipeline(
         const val BATCH = 30
         val VIDEO_EXT = setOf("mp4", "mov", "mkv", "webm", "m4v", "3gp", "avi")
         val DURATION = Regex("Duration:\\s*(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)")
+        val ROTATION = Regex("rotation of (-?\\d+(?:\\.\\d+)?) degrees")
+        val ROTATE_TAG = Regex("rotate\\s*:\\s*(-?\\d+)")
+        const val CHUNK = 600
+        const val FONT_DIR = "/usr/share/fonts/dejavu"
         val VIDEO_SIZE = Regex("Video:.*?,\\s*(\\d{2,5})x(\\d{2,5})")
         val SIL_START = Regex("silence_start:\\s*(-?\\d+(?:\\.\\d+)?)")
         val SIL_END = Regex("silence_end:\\s*(-?\\d+(?:\\.\\d+)?)")

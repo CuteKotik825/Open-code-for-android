@@ -4,28 +4,33 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -36,21 +41,28 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.pocketcode.ui.AppIcons
 import kotlinx.coroutines.launch
 
-/** Режим «Видео»: выбрать ролик, вырезать паузы одной кнопкой, сохранить или отправить. */
+/** Режим «Видео»: выбрать ролик, вырезать паузы, добавить субтитры, сохранить или отправить. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
+    val uriHandler = LocalUriHandler.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) v.pick(uri) }
 
     // Чувствительность: от -50 дБ (режет только явную тишину) до -25 дБ (режет и тихую речь)
@@ -58,16 +70,31 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
     var minSilence by remember { mutableStateOf(0.6) }
     var quality by remember { mutableStateOf(VideoQuality.BALANCED) }
     var small by remember { mutableStateOf(false) }
+    var doCut by remember { mutableStateOf(true) }
+    var doSubs by remember { mutableStateOf(false) }
+    var subStyle by remember { mutableStateOf(SubStyle.CLASSIC) }
+    var lang by remember { mutableStateOf("") }
+    var sttOpen by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
 
     val info = v.info
     val a = v.analysis
     val opt = VideoOptions(quality, if (small) 720 else 0)
 
+    fun start(rel: String, cut: Boolean, subs: SubStyle?) {
+        note = null
+        if (subs != null && !v.speechReady) {
+            sttOpen = true
+            note = "Для субтитров нужен ключ распознавания речи: введите его в блоке «Распознавание речи» ниже."
+            return
+        }
+        v.produceUi(rel, cut, minSilence, noise.toInt(), opt, subs, lang)
+    }
+
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Видео", maxLines = 1) },
-            navigationIcon = { IconButton(onClick = onBack) { androidx.compose.material3.Icon(AppIcons.Back, contentDescription = "Назад") } },
+            navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") } },
         )
     }) { pad ->
         Column(
@@ -105,61 +132,130 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(enabled = v.ready && !v.busy, onClick = { note = null; picker.launch("video/*") }) {
-                        Text(if (info == null) "Выбрать видео" else "Другое видео")
-                    }
+                Button(enabled = v.ready && !v.busy, onClick = { note = null; picker.launch("video/*") }) {
+                    Text(if (info == null) "Выбрать видео" else "Другое видео")
                 }
                 val recent = remember(v.stage, v.resultRel, info?.rel) { v.recent() }.filter { it != info?.rel }
                 if (recent.isNotEmpty() && v.ready) {
                     Text("Уже в проекте:", style = MaterialTheme.typography.labelMedium)
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         recent.forEach { rel ->
-                            androidx.compose.material3.AssistChip(
-                                enabled = !v.busy,
-                                onClick = { note = null; v.select(rel) },
-                                label = { Text(java.io.File(rel).name.take(26)) },
-                            )
+                            AssistChip(enabled = !v.busy, onClick = { note = null; v.select(rel) }, label = { Text(java.io.File(rel).name.take(26)) })
                         }
                     }
                 }
             }
 
-            // ---------- настройки и действия ----------
+            // ---------- что сделать ----------
             if (info != null && v.ready) {
                 SoftCard {
-                    Text("2. Вырезать паузы", style = MaterialTheme.typography.titleMedium)
-                    Text("Как сильно резать: ${sensLabel(noise.toInt())} (${noise.toInt()} дБ)", style = MaterialTheme.typography.bodyMedium)
-                    Slider(
-                        value = noise, onValueChange = { noise = it.toInt().toFloat() }, valueRange = -50f..-25f,
-                        enabled = !v.busy,
-                    )
-                    Text(
-                        "Если вырезается лишнее (тихая речь), сдвиньте влево. Если паузы остаются (шумная комната), вправо.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text("Какие паузы считать:", style = MaterialTheme.typography.labelMedium)
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(0.4 to "от 0,4 с", 0.6 to "от 0,6 с", 1.0 to "от 1 с", 1.5 to "от 1,5 с").forEach { (value, label) ->
-                            FilterChip(selected = minSilence == value, enabled = !v.busy, onClick = { minSilence = value }, label = { Text(label) })
+                    Text("2. Что сделать", style = MaterialTheme.typography.titleMedium)
+
+                    ToggleRow("Вырезать паузы", "Убирает молчание и «зависания»", doCut, !v.busy) { doCut = it }
+                    if (doCut) {
+                        Text("Как сильно резать: ${sensLabel(noise.toInt())} (${noise.toInt()} дБ)", style = MaterialTheme.typography.bodyMedium)
+                        Slider(value = noise, onValueChange = { noise = it.toInt().toFloat() }, valueRange = -50f..-25f, enabled = !v.busy)
+                        Text(
+                            "Вырезается лишнее (тихая речь)? Сдвиньте влево. Паузы остаются (шумная комната)? Вправо.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text("Какие паузы считать:", style = MaterialTheme.typography.labelMedium)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(0.4 to "от 0,4 с", 0.6 to "от 0,6 с", 1.0 to "от 1 с", 1.5 to "от 1,5 с").forEach { (value, label) ->
+                                FilterChip(selected = minSilence == value, enabled = !v.busy, onClick = { minSilence = value }, label = { Text(label) })
+                            }
                         }
                     }
-                    Text("Качество и скорость:", style = MaterialTheme.typography.labelMedium)
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        VideoQuality.values().forEach { q ->
-                            FilterChip(selected = quality == q, enabled = !v.busy, onClick = { quality = q }, label = { Text(q.label) })
+
+                    ToggleRow("Субтитры", "Распознаёт речь и вшивает текст в видео", doSubs, !v.busy) { doSubs = it; if (it && !v.speechReady) sttOpen = true }
+                    if (doSubs) {
+                        Text("Стиль:", style = MaterialTheme.typography.labelMedium)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            SubStyle.values().forEach { st ->
+                                FilterChip(selected = subStyle == st, enabled = !v.busy, onClick = { subStyle = st }, label = { Text(st.label) })
+                            }
                         }
-                        FilterChip(selected = small, enabled = !v.busy, onClick = { small = !small }, label = { Text("Сжать до 720p") })
+                        Text(subStyle.about, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Язык речи:", style = MaterialTheme.typography.labelMedium)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("" to "Авто", "ru" to "Русский", "en" to "English", "uk" to "Українська", "de" to "Deutsch", "es" to "Español").forEach { (code, label) ->
+                                FilterChip(selected = lang == code, enabled = !v.busy, onClick = { lang = code }, label = { Text(label) })
+                            }
+                        }
+                        if (lang == "") Text(
+                            "«Авто» иногда путает язык в начале ролика. Если знаете язык, выберите его: точность выше.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            enabled = !v.busy,
-                            onClick = { note = null; v.removePauses(info.rel, minSilence, noise.toInt(), opt, true) },
-                        ) { Text("Вырезать паузы") }
-                        OutlinedButton(
-                            enabled = !v.busy,
-                            onClick = { note = null; v.removePauses(info.rel, minSilence, noise.toInt(), opt, false) },
-                        ) { Text("Только показать") }
+
+                    if (doCut || doSubs) {
+                        Text("Качество и скорость:", style = MaterialTheme.typography.labelMedium)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            VideoQuality.values().forEach { q ->
+                                FilterChip(selected = quality == q, enabled = !v.busy, onClick = { quality = q }, label = { Text(q.label) })
+                            }
+                            FilterChip(selected = small, enabled = !v.busy, onClick = { small = !small }, label = { Text("Сжать до 720p") })
+                        }
+                    }
+
+                    Button(
+                        enabled = !v.busy && (doCut || doSubs),
+                        onClick = { start(info.rel, doCut, if (doSubs) subStyle else null) },
+                    ) { Text(if (doCut && doSubs) "Вырезать паузы и добавить субтитры" else if (doSubs) "Добавить субтитры" else "Вырезать паузы") }
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(enabled = !v.busy, onClick = { note = null; v.removePauses(info.rel, minSilence, noise.toInt(), opt, false) }) { Text("Показать паузы") }
+                        OutlinedButton(enabled = !v.busy, onClick = {
+                            note = null
+                            if (!v.speechReady) { sttOpen = true; note = "Для текста нужен ключ распознавания речи: введите его ниже." }
+                            else v.transcribeUi(info.rel, lang)
+                        }) { Text("Получить текст") }
+                    }
+                }
+
+                // ---------- распознавание речи ----------
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Распознавание речи", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                when {
+                                    v.sttKey.isNotBlank() -> "Ключ задан · ${v.sttModel}"
+                                    v.sttKeySource.isNotBlank() -> "Ключ из профиля «${v.sttKeySource}» · ${v.sttModel}"
+                                    else -> "Ключ не задан. Нужен для субтитров и текста."
+                                },
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(onClick = { sttOpen = !sttOpen }) { Text(if (sttOpen) "Свернуть" else "Настроить") }
+                    }
+                    if (sttOpen) {
+                        var url by remember(v.sttUrl) { mutableStateOf(v.sttUrl) }
+                        var model by remember(v.sttModel) { mutableStateOf(v.sttModel) }
+                        var key by remember(v.sttKey) { mutableStateOf(v.sttKey) }
+                        Text(
+                            "Подойдёт любой сервис с OpenAI-совместимым распознаванием. Бесплатный вариант: Groq (около 8 часов звука в день). Звук отправляется выбранному сервису.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            AssistChip(onClick = { url = DEFAULT_STT_URL; model = DEFAULT_STT_MODEL }, label = { Text("Groq (бесплатно)") })
+                            AssistChip(onClick = { url = "https://api.openai.com/v1"; model = "whisper-1" }, label = { Text("OpenAI") })
+                            AssistChip(onClick = { runCatching { uriHandler.openUri("https://console.groq.com/keys") } }, label = { Text("Получить ключ Groq") })
+                        }
+                        OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("Адрес API") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("Модель") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(
+                            value = key, onValueChange = { key = it }, label = { Text("Ключ API") }, singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { v.saveSpeech(url, model, key) }) { Text("Сохранить") }
+                            OutlinedButton(onClick = { v.saveSpeech(url, model, key); v.testSpeech() }) { Text("Проверить") }
+                        }
+                        if (v.speechTest.isNotBlank()) Text(v.speechTest, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            "Сервис недоступен из вашей сети? Включите VPN или укажите прокси в настройках приложения.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
@@ -172,6 +268,7 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
                             VideoStage.IMPORT -> "Копирование"
                             VideoStage.TOOLS -> "Подготовка"
                             VideoStage.ANALYZE -> "Анализ звука"
+                            VideoStage.TRANSCRIBE -> "Распознавание речи"
                             else -> "Монтаж"
                         },
                         style = MaterialTheme.typography.titleMedium,
@@ -208,7 +305,28 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
                     )
                     if (a.cuts.isNotEmpty() && v.resultRel == null) {
                         Text("Красное: вырезается. Серое: остаётся.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Button(onClick = { note = null; v.removePauses(info.rel, a.minSilence, a.noiseDb, opt, true) }) { Text("Смонтировать") }
+                        Button(onClick = { doCut = true; start(info.rel, true, if (doSubs) subStyle else null) }) { Text(if (doSubs) "Смонтировать с субтитрами" else "Смонтировать") }
+                    }
+                }
+            }
+
+            // ---------- текст ----------
+            val tr = v.transcript
+            if (tr != null && info != null && v.transcriptRel == info.rel && !v.busy) {
+                SoftCard {
+                    Text("Текст", style = MaterialTheme.typography.titleMedium)
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(
+                            tr.timedText(),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp).verticalScroll(rememberScrollState()),
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { clipboard.setText(AnnotatedString(tr.plainText())); note = "Текст скопирован" }) { Text("Копировать") }
+                        OutlinedButton(onClick = {
+                            note = runCatching { "Сохранено: " + v.saveTranscriptFiles(info.rel) }.getOrElse { "Не удалось сохранить: ${it.message}" }
+                        }) { Text("Сохранить .txt и .srt") }
                     }
                 }
             }
@@ -254,7 +372,7 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
             note?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary) }
 
             Text(
-                "Агент в чате умеет то же самое: напишите, например, «вырежи паузы из video/clip.mp4». Субтитры и монтаж по тексту добавим следующими версиями.",
+                "Агент в чате умеет то же: «вырежи паузы из video/clip.mp4», «добавь субтитры». Монтаж по тексту добавим следующей версией.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 24.dp),
             )
@@ -266,6 +384,17 @@ private fun sensLabel(db: Int) = when {
     db <= -43 -> "осторожно"
     db <= -32 -> "обычно"
     else -> "сильно"
+}
+
+@Composable
+private fun ToggleRow(title: String, about: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(about, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, enabled = enabled, onCheckedChange = onChange)
+    }
 }
 
 @Composable
