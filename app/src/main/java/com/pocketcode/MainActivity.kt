@@ -71,7 +71,7 @@ import com.pocketcode.ui.ProjectsScreen
 import com.pocketcode.ui.SessionsScreen
 import com.pocketcode.ui.SettingsScreen
 
-private enum class Screen { CHAT, SETTINGS, SESSIONS, PROJECTS, FILES, DEVICES, PLUGINS, DIAG, COMPARE, CONTEXT, TERMINAL, GIT, OCSESSIONS, REMOTE, DIFF, SEARCH, HUB_PROJECT, HUB_AGENT, HUB_MORE, FIND, ROOT, OCSETTINGS, MODELS, LINUX, UPDATE, BACKUP }
+private enum class Screen { CHAT, SETTINGS, SESSIONS, PROJECTS, FILES, DEVICES, PLUGINS, DIAG, COMPARE, CONTEXT, TERMINAL, GIT, OCSESSIONS, REMOTE, DIFF, SEARCH, HUB_PROJECT, HUB_AGENT, HUB_MORE, FIND, ROOT, OCSETTINGS, MODELS, LINUX, UPDATE, BACKUP, VIDEO }
 
 class MainActivity : ComponentActivity() {
     private val controller: ChatController
@@ -201,7 +201,7 @@ class MainActivity : ComponentActivity() {
                 val imeOn = androidx.compose.foundation.layout.WindowInsets.ime.getBottom(imeDensity) > with(imeDensity) { 160.dp.roundToPx() }
                 val section = when (screen) {
                     Screen.CHAT -> 0
-                    Screen.HUB_PROJECT, Screen.PROJECTS, Screen.FILES, Screen.SEARCH, Screen.DIFF, Screen.GIT, Screen.TERMINAL -> 1
+                    Screen.HUB_PROJECT, Screen.PROJECTS, Screen.FILES, Screen.SEARCH, Screen.DIFF, Screen.GIT, Screen.TERMINAL, Screen.VIDEO -> 1
                     Screen.HUB_AGENT, Screen.FIND, Screen.MODELS, Screen.OCSESSIONS, Screen.OCSETTINGS, Screen.PLUGINS, Screen.CONTEXT, Screen.COMPARE, Screen.SESSIONS -> 2
                     else -> 3
                 }
@@ -246,6 +246,8 @@ class MainActivity : ComponentActivity() {
                                 com.pocketcode.ui.HubItem(Icons.Default.Edit, "Правки агента", "Что изменил агент, откат по блокам, сравнение со снимком", if (vm.changes.isNotEmpty()) "${vm.changes.size}" else null) { openFrom(Screen.HUB_PROJECT, Screen.DIFF) },
                                 com.pocketcode.ui.HubItem(Icons.Default.PlayArrow, "Терминал и запуск", "Команды в Linux, кнопки запуска проекта") { openFrom(Screen.HUB_PROJECT, Screen.TERMINAL) },
                                 com.pocketcode.ui.HubItem(Icons.Default.Share, "Git и GitHub", "Коммиты, ветки, PR, проверки сборки") { openFrom(Screen.HUB_PROJECT, Screen.GIT) },
+                                com.pocketcode.ui.hubHeader("Медиа"),
+                                com.pocketcode.ui.HubItem(Icons.Default.PlayArrow, "Видео", "Монтаж: вырезать паузы одной кнопкой, без ПК", if (vm.video.busy) "идёт" else null) { openFrom(Screen.HUB_PROJECT, Screen.VIDEO) },
                             ),
                             onSearch = { openFrom(screen, Screen.FIND) },
                         )
@@ -437,6 +439,10 @@ class MainActivity : ComponentActivity() {
                     Screen.ROOT -> {
                         BackHandler { screen = backTo }
                         com.pocketcode.ui.RootScreen(pocketApp.controller, onBack = { screen = backTo }, onToChat = { screen = Screen.CHAT })
+                    }
+                    Screen.VIDEO -> {
+                        BackHandler { screen = backTo }
+                        com.pocketcode.video.VideoScreen(vm.video, onBack = { screen = backTo }, onOpenLinux = { openFrom(Screen.HUB_PROJECT, Screen.LINUX) })
                     }
                     Screen.LINUX -> {
                         BackHandler { screen = backTo }

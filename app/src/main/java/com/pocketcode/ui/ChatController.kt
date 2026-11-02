@@ -85,6 +85,8 @@ import com.pocketcode.linux.SwitchableShell
 import com.pocketcode.python.PythonRunner
 import com.pocketcode.service.AgentService
 import com.pocketcode.service.Notifier
+import com.pocketcode.video.VideoPipeline
+import com.pocketcode.video.VideoTool
 import com.pocketcode.session.SessionData
 import com.pocketcode.session.SessionMeta
 import com.pocketcode.session.SessionStore
@@ -4355,6 +4357,7 @@ class ChatController(
             WebSearchTool(),
             WebFetchTool(),
             if (linuxActive) AdbTool(workspace, linuxShell) { devices } else null,
+            if (linuxActive) VideoTool(video) else null,
             if (rootEnabled) RootTool(workspace, rootShell) else null,
         )
         val sysPrompt = systemPrompt(
@@ -4418,6 +4421,23 @@ class ChatController(
 
     private var serviceHeld = false
 
+    /** Монтаж видео тоже держит сервис, чтобы Android не убил ffmpeg при свёрнутом приложении. */
+    private var videoHold = false
+
+    /** Режим «Видео»: монтаж через ffmpeg в среде Linux. */
+    val video: VideoPipeline by lazy {
+        VideoPipeline(
+            app = app,
+            shell = { shell },
+            root = { workspace.root },
+            linuxReady = { linuxActive },
+            proxyEnv = { proxyEnv() },
+            keepAlive = { videoHold = true; startService() },
+            release = { videoHold = false; if (!running) stopService() },
+            appVisible = { appVisible },
+        )
+    }
+
     private fun startService() {
         if (!serviceHeld) { serviceHeld = true; serviceUsers.incrementAndGet() }
         try {
@@ -4428,6 +4448,7 @@ class ChatController(
     }
 
     private fun stopService() {
+        if (videoHold) return
         if (!serviceHeld) return
         serviceHeld = false
         if (serviceUsers.decrementAndGet() > 0) return
