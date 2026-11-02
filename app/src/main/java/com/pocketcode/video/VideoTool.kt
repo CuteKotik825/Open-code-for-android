@@ -41,6 +41,8 @@ class VideoTool(private val pipeline: VideoPipeline) : Tool {
     }
 }
 
+private const val SHORTS_HELP = "true — вертикальный ролик 9:16 для Shorts/Reels/TikTok (кадр обрезается по центру)"
+
 private const val TRANSITION_HELP =
     "Переход между кусками: zoom (по умолчанию, чередующееся приближение), cut (резкий), fade (наплыв), flash (вспышка), slide (сдвиг), blur (размытие), circle (круг), mix (разные)"
 
@@ -89,6 +91,7 @@ class VideoSubtitlesTool(private val pipeline: VideoPipeline) : Tool {
         Prop("min_silence", "number", "Минимальная длина паузы в секундах при cut_pauses (по умолчанию 0.6)", required = false),
         Prop("noise_db", "integer", "Порог тишины в дБ, от -60 до -20 (по умолчанию -35)", required = false),
         Prop("transition", "string", TRANSITION_HELP, required = false),
+        Prop("shorts", "boolean", SHORTS_HELP, required = false),
     )
 
     override fun needsApproval(input: JsonObject) = true
@@ -101,7 +104,7 @@ class VideoSubtitlesTool(private val pipeline: VideoPipeline) : Tool {
             input.bool("cut_pauses") == true,
             (input.number("min_silence") ?: 0.6).coerceIn(0.2, 10.0),
             (input.int("noise_db") ?: -35).coerceIn(-60, -20),
-            VideoOptions(transition = transitionByName(input.str("transition"))),
+            VideoOptions(transition = transitionByName(input.str("transition")), vertical = input.bool("shorts") == true),
             style,
             input.str("language")?.trim().orEmpty(),
         )
@@ -122,6 +125,7 @@ class VideoCutRangesTool(private val pipeline: VideoPipeline) : Tool {
         Prop("style", "string", "Стиль субтитров, если subtitles=true: classic, box, karaoke, pop, big, neon, comic", required = false),
         Prop("transition", "string", TRANSITION_HELP, required = false),
         Prop("language", "string", "Код языка речи для субтитров (ru, en…)", required = false),
+        Prop("shorts", "boolean", SHORTS_HELP, required = false),
     )
 
     override fun needsApproval(input: JsonObject) = true
@@ -138,6 +142,6 @@ class VideoCutRangesTool(private val pipeline: VideoPipeline) : Tool {
         val subs = if (input.bool("subtitles") == true) {
             styleByName(input.str("style"))
         } else null
-        return pipeline.cutRanges(input.cleanPath(), cuts, VideoOptions(transition = transitionByName(input.str("transition"))), subs, input.str("language")?.trim().orEmpty())
+        return pipeline.cutRanges(input.cleanPath(), cuts, VideoOptions(transition = transitionByName(input.str("transition")), vertical = input.bool("shorts") == true), subs, input.str("language")?.trim().orEmpty())
     }
 }

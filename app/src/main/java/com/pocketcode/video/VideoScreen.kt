@@ -59,7 +59,7 @@ import kotlinx.coroutines.launch
 /** Режим «Видео»: выбрать ролик, вырезать паузы, добавить субтитры, сохранить или отправить. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
+fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit, onAsk: (String) -> Unit = {}) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
@@ -72,6 +72,7 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
     var quality by remember { mutableStateOf(VideoQuality.BALANCED) }
     var small by remember { mutableStateOf(false) }
     var transition by remember { mutableStateOf(Transition.ZOOM) }
+    var shorts by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var withPauses by remember { mutableStateOf(false) }
     var doCut by remember { mutableStateOf(true) }
@@ -83,7 +84,7 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
 
     val info = v.info
     val a = v.analysis
-    val opt = VideoOptions(quality, if (small) 720 else 0, transition)
+    val opt = VideoOptions(quality, if (small) 720 else 0, transition, shorts)
 
     fun start(rel: String, cut: Boolean, subs: SubStyle?) {
         note = null
@@ -227,9 +228,20 @@ fun VideoScreen(v: VideoPipeline, onBack: () -> Unit, onOpenLinux: () -> Unit) {
                                 FilterChip(selected = quality == q, enabled = !v.busy, onClick = { quality = q }, label = { Text(q.label) })
                             }
                             FilterChip(selected = small, enabled = !v.busy, onClick = { small = !small }, label = { Text("Сжать до 720p") })
+                            FilterChip(selected = shorts, enabled = !v.busy, onClick = { shorts = !shorts }, label = { Text("Shorts 9:16") })
                         }
                     }
 
+                    if (shorts) Text("Shorts: кадр станет вертикальным 9:16 (обрезка по центру).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedButton(enabled = !v.busy, onClick = {
+                        val styleName = if (doSubs) subStyle.name.lowercase() else "pop"
+                        onAsk(
+                            "Смонтируй видео ${info.rel} как короткий динамичный ролик: распознай речь (video_transcribe), " +
+                                "найди и вырежи ошибки, дубли, повторы, слова-паразиты и долгое молчание, оставь лучшие дубли. " +
+                                "Потом вызови video_cut_ranges с subtitles=true, style=$styleName, transition=${transition.name.lowercase()}" +
+                                (if (shorts) ", shorts=true" else "") + ". Перед вырезанием коротко перечисли, что убираешь."
+                        )
+                    }) { Text("Умный монтаж (ИИ в чате)") }
                     Button(
                         enabled = !v.busy && (doCut || doSubs),
                         onClick = { start(info.rel, doCut, if (doSubs) subStyle else null) },

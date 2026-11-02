@@ -36,7 +36,7 @@ enum class VideoQuality(val label: String, val preset: String, val crf: Int) {
     HIGH("Качество", "faster", 20),
 }
 
-data class VideoOptions(val quality: VideoQuality = VideoQuality.BALANCED, val maxHeight: Int = 0, val transition: Transition = Transition.ZOOM)
+data class VideoOptions(val quality: VideoQuality = VideoQuality.BALANCED, val maxHeight: Int = 0, val transition: Transition = Transition.ZOOM, val vertical: Boolean = false)
 
 data class TimeRange(val start: Double, val end: Double) {
     val length: Double get() = end - start
@@ -415,6 +415,7 @@ class VideoPipeline(
     }
 
     private fun outSize(vi: VideoInfo, opt: VideoOptions): Pair<Int, Int> {
+        if (opt.vertical) return if (opt.maxHeight in 1..1279) 720 to 1280 else 1080 to 1920
         if (vi.width <= 0 || vi.height <= 0) return 1280 to 720
         if (opt.maxHeight > 0 && vi.height > opt.maxHeight) {
             val h = opt.maxHeight
@@ -558,7 +559,7 @@ class VideoPipeline(
             val b = f(r.end - w0)
             sb.append("[0:v]trim=start=$a:end=$b,setpts=PTS-STARTPTS")
             if (xf) sb.append(",fps=$fps,tpad=stop_mode=clone:stop_duration=0.5,trim=end_frame=${plan.frames[i]},setpts=PTS-STARTPTS")
-            if (zoom) sb.append(if ((base + i) % 2 == 1) ",scale=$zw:$zh,crop=$ow:$oh" else ",scale=$ow:$oh")
+            if (zoom) sb.append(if ((base + i) % 2 == 1) ",scale=$zw:$zh:force_original_aspect_ratio=increase,crop=$ow:$oh" else ",scale=$ow:$oh:force_original_aspect_ratio=increase,crop=$ow:$oh")
             sb.append("[v$i];")
             if (vi.hasAudio) {
                 if (xf) {
@@ -596,7 +597,12 @@ class VideoPipeline(
             vl = "cv"
             al = "ca"
         }
-        val scale = if (!zoom && opt.maxHeight > 0 && vi.height > opt.maxHeight) "scale=-2:${opt.maxHeight}" else "null"
+        val scale = when {
+            zoom -> "null"
+            opt.vertical -> "scale=$ow:$oh:force_original_aspect_ratio=increase,crop=$ow:$oh"
+            opt.maxHeight > 0 && vi.height > opt.maxHeight -> "scale=-2:${opt.maxHeight}"
+            else -> "null"
+        }
         sb.append("[$vl]$scale[vs]")
         if (ass != null) sb.append(";[vs]ass=filename=$ass:fontsdir=$FONT_DIR[vo]") else sb.append(";[vs]null[vo]")
         if (vi.hasAudio) sb.append(";[$al]anull[ao]")

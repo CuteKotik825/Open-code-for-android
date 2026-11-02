@@ -442,7 +442,7 @@ class MainActivity : ComponentActivity() {
                     }
                     Screen.VIDEO -> {
                         BackHandler { screen = backTo }
-                        com.pocketcode.video.VideoScreen(vm.video, onBack = { screen = backTo }, onOpenLinux = { openFrom(Screen.HUB_PROJECT, Screen.LINUX) })
+                        com.pocketcode.video.VideoScreen(vm.video, onBack = { screen = backTo }, onOpenLinux = { openFrom(Screen.HUB_PROJECT, Screen.LINUX) }, onAsk = { prompt -> screen = Screen.CHAT; vm.send(prompt) })
                     }
                     Screen.LINUX -> {
                         BackHandler { screen = backTo }
