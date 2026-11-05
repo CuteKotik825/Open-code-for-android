@@ -347,6 +347,14 @@ class ChatController(
     var hostPending by mutableStateOf<List<HostReq>>(emptyList())
         private set
 
+    /** Задержка перед подтверждением root-команды: 0 — сразу, 5 — кнопки включаются через 5 секунд. Для изменения системы всегда не меньше 5. */
+    var rootDelay by mutableStateOf(settingsStore.rawGet("rootDelay")?.toIntOrNull()?.takeIf { it == 0 || it == 5 } ?: 5)
+        private set
+    fun setRootDelayValue(v: Int) {
+        rootDelay = v
+        settingsStore.rawPut("rootDelay", v.toString())
+    }
+
     /** off — мост выключен (по умолчанию), ask — каждый запрос подтверждается вручную. */
     var hostMode by mutableStateOf(settingsStore.rawGet("hostMode")?.takeIf { it == "ask" } ?: "off")
         private set
@@ -2288,7 +2296,7 @@ class ChatController(
 
     private val backupPrefKeys = listOf(
         "syncRepo", "syncProjects", "syncInterval", "syncHost", "ocFallback", "ocAutoSwitch", "ocAutoCompact", "ocRateRetryMin",
-        "hostMode", "rpmLimit", "ocBudget", "ocListLim", "ocShowLim", "ocFresh", "ocExtMode", "ocModel", "ocCards", "themeMode", "palette", "amoled", "templates", "stars", "ocPins", "ocTitles", "bigInput",
+        "hostMode", "rootDelay", "rpmLimit", "ocBudget", "ocListLim", "ocShowLim", "ocFresh", "ocExtMode", "ocModel", "ocCards", "themeMode", "palette", "amoled", "templates", "stars", "ocPins", "ocTitles", "bigInput",
     )
 
     private fun cryptKey(password: String, salt: ByteArray): javax.crypto.spec.SecretKeySpec {

@@ -848,6 +848,9 @@ fun ChatScreen(
     }
 
     vm.approval?.let { request ->
+        val rootCmd = if (request.tool == "root") request.description.removePrefix("ROOT $ ") else null
+        val rootInfo = rootCmd?.let { rootNote(it) }
+        val rootLeft = rememberRootCountdown(request, if (rootInfo != null) rootDelaySeconds(vm.rootDelay, rootInfo) else 0)
         AlertDialog(
             onDismissRequest = { },
             title = { Text("Разрешить: ${request.tool}?") },
@@ -873,13 +876,14 @@ fun ChatScreen(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                     )
+                    if (rootInfo != null) RootNoteView(rootInfo, vm.rootDelay)
                     if (request.tool == "write_file" || request.tool == "edit_file") {
                         TextButton(onClick = { vm.allowEditsThisRun() }) { Text("Принимать все правки до конца задачи") }
                     }
                 }
             },
             confirmButton = {
-                TextButton(onClick = { vm.answerApproval(true) }) { Text("Разрешить") }
+                TextButton(onClick = { vm.answerApproval(true) }, enabled = rootLeft == 0) { Text(if (rootLeft > 0) "Разрешить ($rootLeft)" else "Разрешить") }
             },
             dismissButton = {
                 TextButton(onClick = { vm.answerApproval(false) }) { Text("Отклонить") }

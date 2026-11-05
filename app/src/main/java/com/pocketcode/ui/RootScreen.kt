@@ -91,6 +91,19 @@ fun RootScreen(vm: ChatController, onBack: () -> Unit, onToChat: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
             )
 
+            Option("Подтверждение root-команд", "Под каждой командой пишется, что она делает. Здесь выбираешь, когда кнопка «Выполнить» станет доступной.") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    androidx.compose.material3.FilterChip(selected = vm.rootDelay == 0, onClick = { vm.setRootDelayValue(0) }, label = { Text("Без тайм-аута") })
+                    androidx.compose.material3.FilterChip(selected = vm.rootDelay == 5, onClick = { vm.setRootDelayValue(5) }, label = { Text("Тайм-аут 5 с") })
+                }
+                Text(
+                    if (vm.rootDelay == 0) "Кнопка подтверждения доступна сразу, окно ждёт тебя сколько нужно."
+                    else "Кнопка подтверждения включается через 5 секунд после появления окна, чтобы нельзя было нажать не глядя.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text("Если команда удаляет, создаёт или перезаписывает системные файлы, меняет разделы или свойства Android, тайм-аут 5 с включается всегда, даже в режиме без тайм-аута.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+
             Option("1. Вручную", "Ты сам выполняешь команду в терминале с root (Termux) и кладёшь вывод в общую папку проекта. Агент читает файл. Приложение ничего не запускает.") {
                 val sample = "su -c 'dumpsys audio' > /storage/emulated/0/PocketCode/${vm.currentProject}/audio.txt"
                 Text(sample, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
@@ -144,7 +157,7 @@ fun RootScreen(vm: ChatController, onBack: () -> Unit, onToChat: () -> Unit) {
                     )
                 }
                 Text("⚠ $BRIDGE_WARNING", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                Text("Окно подтверждения не закрывается само, но кнопки выполнения включаются через 15 секунд после появления запроса. Если приложение свёрнуто, придёт уведомление.", style = MaterialTheme.typography.labelSmall)
+                Text("Окно подтверждения не закрывается само. Если приложение свёрнуто, придёт уведомление.", style = MaterialTheme.typography.labelSmall)
             }
         }
     }
@@ -164,21 +177,29 @@ fun RootScreen(vm: ChatController, onBack: () -> Unit, onToChat: () -> Unit) {
         )
     }
     if (confirmRun) {
+        val note = remember(cmd) { rootNote(cmd) }
+        val left = rememberRootCountdown(cmd, rootDelaySeconds(vm.rootDelay, note))
         AlertDialog(
             onDismissRequest = { confirmRun = false },
             title = { Text("Выполнить от root?") },
-            text = { Text(cmd.take(800), fontFamily = FontFamily.Monospace) },
-            confirmButton = { TextButton(onClick = { confirmRun = false; vm.runRootOnce(cmd) }) { Text("Выполнить") } },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(cmd.take(800), fontFamily = FontFamily.Monospace)
+                    RootNoteView(note, vm.rootDelay)
+                }
+            },
+            confirmButton = { TextButton(onClick = { confirmRun = false; vm.runRootOnce(cmd) }, enabled = left == 0) { Text(if (left > 0) "Выполнить ($left)" else "Выполнить") } },
             dismissButton = { TextButton(onClick = { confirmRun = false }) { Text("Отмена") } },
         )
     }
 }
 
-/** Окно подтверждения: агент в Linux просит выполнить команду на самом телефоне. Без таймера, но кнопки включаются через 15 секунд. */
+/** Окно подтверждения: агент в Linux просит выполнить команду на самом телефоне. Окно само не закрывается; кнопки включаются сразу или через 5 секунд (для изменения системы всегда через 5). */
 @Composable
 fun HostBridgeDialog(vm: ChatController) {
     val req = vm.hostPending.firstOrNull() ?: return
-    val left = rememberCountdown(req.id)
+    val note = remember(req.command) { rootNote(req.command) }
+    val left = rememberRootCountdown(req.id, rootDelaySeconds(vm.rootDelay, note))
     val clip = androidx.compose.ui.platform.LocalClipboardManager.current
     val summary = "Агент OpenCode в Linux-песочнице на моём телефоне просит выполнить на самом Android (root, Magisk) команду:\n\n" + req.command +
         "\n\nБезопасно ли её выполнять? Что она сделает?"
@@ -188,8 +209,8 @@ fun HostBridgeDialog(vm: ChatController) {
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("⚠ Команда выполнится на твоём телефоне. Прочитай её внимательно.", color = MaterialTheme.colorScheme.error)
-                Text("Окно не закроется само, агент подождёт. Кнопки выполнения включатся через 15 секунд.", style = MaterialTheme.typography.bodySmall)
                 Text(req.command.take(1500), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                RootNoteView(note, vm.rootDelay)
                 dangerNote(req.command)?.let { Text("⚠ $it", color = MaterialTheme.colorScheme.error) }
                 Text(
                     "«От root» выполнит команду через Magisk (root должен быть выдан приложению). dumpsys, getprop, logcat только читают. «Без root» запустит её с правами самого приложения.",
