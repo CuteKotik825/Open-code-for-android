@@ -431,6 +431,7 @@ fun ChatScreen(
                         }
                     }
                 }
+                if (!vm.openCodeMode) androidx.compose.material3.AssistChip(onClick = onOpenSessions, label = { Text("🕘 История") })
                 androidx.compose.material3.AssistChip(onClick = onOpenFiles, label = { Text("Файлы") }, leadingIcon = { Icon(AppIcons.Folder, null, Modifier.size(16.dp)) })
                 androidx.compose.material3.AssistChip(onClick = onOpenTerminal, label = { Text("Терминал") })
                 if (vm.changes.isNotEmpty()) androidx.compose.material3.AssistChip(onClick = onOpenDiff, label = { Text("Правки (${vm.changes.size})") })

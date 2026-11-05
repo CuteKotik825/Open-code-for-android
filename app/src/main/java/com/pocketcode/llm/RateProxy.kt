@@ -108,6 +108,7 @@ class RateProxy(private val token: String) {
         val ct = headers["content-type"]?.toMediaTypeOrNull()
         if (method == "GET" || method == "HEAD") rb.method(method, null) else rb.method(method, body.toRequestBody(ct))
         client.newCall(rb.build()).execute().use { r ->
+            if (r.code == 429) RateGate.penalize(RateGate.retryAfterMs(r.header("Retry-After")) ?: 65_000L)
             val o = c.getOutputStream()
             val sb = StringBuilder("HTTP/1.1 ${r.code} ${r.message.ifEmpty { "X" }}\r\n")
             r.headers.forEach { (k, v) ->

@@ -17,14 +17,24 @@ object RateGate {
     @Volatile var waitingMs: Long = 0
         private set
 
+    /** Сервис ответил 429: следующие запросы не раньше чем через [ms] мс (Retry-After или минута с запасом). */
+    fun penalize(ms: Long) {
+        if (perMinute <= 0) return
+        synchronized(this) { nextAt = maxOf(nextAt, System.currentTimeMillis() + ms) }
+    }
+
+    /** Секунды из заголовка Retry-After (если есть), иначе null. */
+    fun retryAfterMs(header: String?): Long? = header?.trim()?.toDoubleOrNull()?.let { (it * 1000).toLong().coerceIn(1000L, 600_000L) }
+
     suspend fun acquire() {
         val n = perMinute
         if (n <= 0) return
-        val gap = 60_000L / n
+        // Небольшой запас: сервис считает запросы по своим часам, и ровно 60 с между запросами при 1 в минуту уже могут не пройти
+        val base = 60_000L / n
+        val gap = base + (base * 0.08).toLong().coerceIn(500L, 4000L)
         val wait = mutex.withLock {
             val now = System.currentTimeMillis()
-            val at = maxOf(now, nextAt)
-            nextAt = at + gap
+            val at = synchronized(this) { maxOf(now, nextAt).also { nextAt = it + gap } }
             at - now
         }
         if (wait > 0) {

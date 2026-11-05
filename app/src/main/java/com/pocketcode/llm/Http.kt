@@ -45,6 +45,7 @@ object Http {
         val reader = async(Dispatchers.IO) {
             call.execute().use { r ->
                 if (!r.isSuccessful) {
+                    if (r.code == 429) RateGate.penalize(RateGate.retryAfterMs(r.header("Retry-After")) ?: 65_000L)
                     throw IOException("HTTP ${r.code}: ${r.body?.string().orEmpty().take(800)}")
                 }
                 val source = r.body?.source() ?: throw IOException("Пустой ответ сервера")
@@ -91,6 +92,7 @@ object Http {
                         if (r.isSuccessful) {
                             cont.resume(text)
                         } else {
+                            if (r.code == 429) RateGate.penalize(RateGate.retryAfterMs(r.header("Retry-After")) ?: 65_000L)
                             cont.resumeWithException(IOException("HTTP ${r.code}: ${text.take(800)}"))
                         }
                     }
