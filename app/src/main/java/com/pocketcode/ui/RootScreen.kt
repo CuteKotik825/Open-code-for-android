@@ -174,7 +174,7 @@ fun RootScreen(vm: ChatController, onBack: () -> Unit, onToChat: () -> Unit) {
                     }
                     Switch(
                         checked = vm.rootAuto,
-                        onCheckedChange = { if (it) confirmAuto = true else vm.setRootAuto(false) },
+                        onCheckedChange = { if (it) confirmAuto = true else vm.setRootAutoValue(false) },
                     )
                 }
                 Text("⚠ $AUTO_WARNING", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -187,8 +187,8 @@ fun RootScreen(vm: ChatController, onBack: () -> Unit, onToChat: () -> Unit) {
                 }
                 Text("Файловые действия одобряет:", style = MaterialTheme.typography.titleSmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    androidx.compose.material3.FilterChip(selected = vm.rootReviewMode == "me", onClick = { vm.setRootReviewMode("me") }, label = { Text("Я сам") })
-                    androidx.compose.material3.FilterChip(selected = vm.rootReviewMode == "ai", onClick = { vm.setRootReviewMode("ai") }, label = { Text("Нейросеть") })
+                    androidx.compose.material3.FilterChip(selected = vm.rootReviewMode == "me", onClick = { vm.setRootReviewModeValue("me") }, label = { Text("Я сам") })
+                    androidx.compose.material3.FilterChip(selected = vm.rootReviewMode == "ai", onClick = { vm.setRootReviewModeValue("ai") }, label = { Text("Нейросеть") })
                 }
                 if (vm.rootReviewMode == "ai") {
                     Text("Какая нейросеть проверяет (профиль из «Модель и ключи»):", style = MaterialTheme.typography.bodySmall)
@@ -221,7 +221,7 @@ fun RootScreen(vm: ChatController, onBack: () -> Unit, onToChat: () -> Unit) {
             title = { Text("Включить авто-режим?") },
             text = { Text("⚠ $AUTO_WARNING", color = MaterialTheme.colorScheme.error) },
             confirmButton = {
-                TextButton(onClick = { confirmAuto = false; vm.setRootAuto(true) }, enabled = left == 0) {
+                TextButton(onClick = { confirmAuto = false; vm.setRootAutoValue(true) }, enabled = left == 0) {
                     Text(if (left > 0) "Включить ($left)" else "Включить")
                 }
             },

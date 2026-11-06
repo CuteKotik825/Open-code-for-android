@@ -342,6 +342,65 @@ class ChatController(
         }
     }
 
+    // ---------- бесплатный старт ----------
+
+    var freeStartHidden by mutableStateOf(settingsStore.rawGet("freeStartHidden") == "1")
+        private set
+    var freeStartBusy by mutableStateOf(false)
+        private set
+    var freeStartMsg by mutableStateOf<String?>(null)
+        private set
+
+    /** Новичку без ключей показываем кнопку «Начать бесплатно», пока он её не скроет или не подключит модель. */
+    val needsFreeStart: Boolean
+        get() = !freeStartHidden && settings.apiKey.isBlank() && profiles.all { it.apiKey.isBlank() } && !openCodeMode
+
+    fun hideFreeStart() {
+        freeStartHidden = true
+        settingsStore.rawPut("freeStartHidden", "1")
+    }
+
+    /** Одна кнопка для новичка: Linux, Node и OpenCode с его бесплатными моделями, затем режим OpenCode. */
+    fun startFree() {
+        if (running || linuxBusy || freeStartBusy || termBusy) return
+        if (!linuxSupported) {
+            freeStartMsg = "Встроенный Linux на этом телефоне не поддерживается. Подключи модель по ключу: Агент → Модель и ключи."
+            return
+        }
+        freeStartBusy = true
+        scope.launch {
+            try {
+                if (!linuxEnv.isInstalled()) {
+                    freeStartMsg = "Шаг 1 из 3: ставлю мини-Linux (около 4 МБ)…"
+                    installLinux()
+                    while (linuxBusy) delay(500)
+                    if (!linuxInstalled) error("Linux не установился: " + (linuxStatus ?: "причина неизвестна"))
+                }
+                if (!linuxEnabled) chooseLinuxShell(true)
+                freeStartMsg = "Шаг 2 из 3: ставлю OpenCode, это несколько минут. Ход установки виден в Терминале."
+                termRun(
+                    "(command -v npm >/dev/null 2>&1 || (echo 'Ставлю nodejs и npm…'; apk add --no-cache nodejs npm git libstdc++ libgcc 2>&1 | tail -n 3)); " +
+                        "case \"\$(uname -m)\" in aarch64|arm64) P=opencode-linux-arm64-musl;; *) P=opencode-linux-x64-musl;; esac; " +
+                        "npm install -g --force opencode-ai \$P > /tmp/oc-install.log 2>&1; echo \"код установки: \$?\"; tail -n 15 /tmp/oc-install.log; opencode --version",
+                    900,
+                )
+                while (termBusy) delay(500)
+                val out = term.lastOrNull()?.out.orEmpty()
+                if (!out.contains("код установки: 0")) error("OpenCode не установился. Последний вывод:\n" + out.takeLast(500))
+                freeStartMsg = "Шаг 3 из 3: включаю режим OpenCode"
+                openCodeMode = true
+                freeStartMsg = null
+                doneNote = "Готово: бесплатные модели OpenCode включены, можно писать задачу."
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                freeStartMsg = (e.message ?: "ошибка") + "\nЕсли загрузка обрывается, включи VPN и нажми кнопку ещё раз."
+            } finally {
+                freeStartBusy = false
+            }
+        }
+    }
+
     // ---------- root и доступ к Android ----------
 
     class HostReq(val id: String, val command: String)
@@ -382,7 +441,7 @@ class ChatController(
         }
     }
 
-    fun setRootAuto(on: Boolean) {
+    fun setRootAutoValue(on: Boolean) {
         rootAutoJob?.cancel()
         rootAutoJob = null
         rootAuto = on
@@ -398,7 +457,7 @@ class ChatController(
         }
     }
 
-    fun setRootReviewMode(v: String) {
+    fun setRootReviewModeValue(v: String) {
         rootReviewMode = v
         settingsStore.rawPut("rootReviewMode", v)
     }
