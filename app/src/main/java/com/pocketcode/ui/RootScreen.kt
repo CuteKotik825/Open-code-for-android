@@ -41,6 +41,12 @@ private const val BRIDGE_WARNING =
     "Агент сможет присылать команды, которые выполнятся на твоём телефоне от root. Неверная команда может стереть данные, сломать систему " +
         "или открыть доступ к аккаунтам. Каждую команду ты подтверждаешь вручную: читай её целиком и, если не уверен, проверь у нейросети."
 
+private const val AUTO_WARNING =
+    "Агент сможет выполнять команды и менять файлы без твоего подтверждения. Если файловые действия проверяет нейросеть, она может ошибиться, " +
+        "а изменения вне папки проекта откатить нельзя. Проверяющая нейросеть видит только само действие, а не твой чат. " +
+        "Опасные операции (системные разделы, прошивка, перезагрузка, массовое удаление) всегда спрашивают тебя. " +
+        "Режим выключится сам через 2 часа или при перезапуске приложения."
+
 /** Обратный отсчёт: пока не дошёл до нуля, подтверждение недоступно. */
 @Composable
 private fun rememberCountdown(key: Any, seconds: Int = 15): Int {
@@ -71,6 +77,7 @@ private fun Option(title: String, about: String, content: @Composable () -> Unit
 fun RootScreen(vm: ChatController, onBack: () -> Unit, onToChat: () -> Unit) {
     val clip = androidx.compose.ui.platform.LocalClipboardManager.current
     var confirmEnable by remember { mutableStateOf(false) }
+    var confirmAuto by remember { mutableStateOf(false) }
     var cmd by remember { mutableStateOf("") }
     var confirmRun by remember { mutableStateOf(false) }
     Scaffold(
@@ -159,7 +166,67 @@ fun RootScreen(vm: ChatController, onBack: () -> Unit, onToChat: () -> Unit) {
                 Text("⚠ $BRIDGE_WARNING", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 Text("Окно подтверждения не закрывается само. Если приложение свёрнуто, придёт уведомление.", style = MaterialTheme.typography.labelSmall)
             }
+
+            Option("5. Авто-режим", "Всё подтверждается само, кроме создания, правки и удаления файлов: их одобряешь ты или нейросеть-проверяющая. Опасные команды всегда спрашивают тебя.") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(if (vm.rootAuto) "Включён (выключится сам через 2 часа)" else "Выключен")
+                    }
+                    Switch(
+                        checked = vm.rootAuto,
+                        onCheckedChange = { if (it) confirmAuto = true else vm.setRootAuto(false) },
+                    )
+                }
+                Text("⚠ $AUTO_WARNING", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                if (vm.settings.autoApprove) {
+                    Text(
+                        "В настройках включено «выполнять без подтверждения»: при нём файловые действия не проверяются вообще. Выключи его, чтобы работала проверка.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Text("Файловые действия одобряет:", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    androidx.compose.material3.FilterChip(selected = vm.rootReviewMode == "me", onClick = { vm.setRootReviewMode("me") }, label = { Text("Я сам") })
+                    androidx.compose.material3.FilterChip(selected = vm.rootReviewMode == "ai", onClick = { vm.setRootReviewMode("ai") }, label = { Text("Нейросеть") })
+                }
+                if (vm.rootReviewMode == "ai") {
+                    Text("Какая нейросеть проверяет (профиль из «Модель и ключи»):", style = MaterialTheme.typography.bodySmall)
+                    vm.profiles.forEach { p ->
+                        androidx.compose.material3.FilterChip(
+                            selected = vm.rootReviewerId == p.id,
+                            onClick = { vm.setRootReviewer(p.id) },
+                            label = { Text("${p.label} · ${p.model}", maxLines = 1) },
+                        )
+                    }
+                    if (vm.profiles.none { it.id == vm.rootReviewerId }) {
+                        Text("Профиль не выбран: пока ты не выберешь, файловые действия будут спрашивать тебя.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    Text("Нейросеть может только одобрить. Если она не ответила за 30 секунд, ответила непонятно или сомневается, решаешь ты.", style = MaterialTheme.typography.labelSmall)
+                }
+                if (vm.rootAutoLog.isNotEmpty()) {
+                    Text("Журнал решений", style = MaterialTheme.typography.titleSmall)
+                    vm.rootAutoLog.take(10).forEach {
+                        Text(it, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
         }
+    }
+
+    if (confirmAuto) {
+        val left = rememberCountdown("auto", 20)
+        AlertDialog(
+            onDismissRequest = { confirmAuto = false },
+            title = { Text("Включить авто-режим?") },
+            text = { Text("⚠ $AUTO_WARNING", color = MaterialTheme.colorScheme.error) },
+            confirmButton = {
+                TextButton(onClick = { confirmAuto = false; vm.setRootAuto(true) }, enabled = left == 0) {
+                    Text(if (left > 0) "Включить ($left)" else "Включить")
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmAuto = false }) { Text("Отмена") } },
+        )
     }
 
     if (confirmEnable) {

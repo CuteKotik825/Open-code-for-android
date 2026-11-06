@@ -51,6 +51,9 @@ import com.pocketcode.tools.DiagnosticsTool
 import com.pocketcode.tools.PreviewTool
 import com.pocketcode.agent.AgentHooks
 import com.pocketcode.agent.PermissionRules
+import com.pocketcode.agent.Decision
+import com.pocketcode.agent.RootAuto
+import com.pocketcode.agent.AutoVerdict
 import com.pocketcode.tools.PresentPlanTool
 import com.pocketcode.tools.TodoTool
 import com.pocketcode.tools.looksBinary
@@ -353,6 +356,63 @@ class ChatController(
     fun setRootDelayValue(v: Int) {
         rootDelay = v
         settingsStore.rawPut("rootDelay", v.toString())
+    }
+
+    /**
+     * Авто-режим: подтверждения идут сами, а создание, правку и удаление файлов одобряет пользователь или нейросеть-проверяющая.
+     * Не сохраняется (после перезапуска выключен) и сам выключается через 2 часа.
+     */
+    var rootAuto by mutableStateOf(false)
+        private set
+    private var rootAutoJob: Job? = null
+
+    /** me — файловые действия одобряет пользователь, ai — проверяющая нейросеть (профиль rootReviewerId). */
+    var rootReviewMode by mutableStateOf(settingsStore.rawGet("rootReviewMode")?.takeIf { it == "ai" } ?: "me")
+        private set
+    var rootReviewerId by mutableStateOf(settingsStore.rawGet("rootReviewer") ?: "")
+        private set
+
+    /** Что решил авто-режим: новые записи сверху, до 100 штук. */
+    val rootAutoLog = androidx.compose.runtime.mutableStateListOf<String>()
+
+    private fun logAuto(text: String) {
+        scope.launch {
+            rootAutoLog.add(0, java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()) + " " + text.take(160))
+            while (rootAutoLog.size > 100) rootAutoLog.removeAt(rootAutoLog.lastIndex)
+        }
+    }
+
+    fun setRootAuto(on: Boolean) {
+        rootAutoJob?.cancel()
+        rootAutoJob = null
+        rootAuto = on
+        if (on) {
+            logAuto("Авто-режим включён на 2 часа")
+            rootAutoJob = scope.launch {
+                delay(RootAuto.MAX_ON_MS)
+                rootAuto = false
+                logAuto("Авто-режим выключился сам через 2 часа")
+            }
+        } else {
+            logAuto("Авто-режим выключен")
+        }
+    }
+
+    fun setRootReviewMode(v: String) {
+        rootReviewMode = v
+        settingsStore.rawPut("rootReviewMode", v)
+    }
+
+    fun setRootReviewer(id: String) {
+        rootReviewerId = id
+        settingsStore.rawPut("rootReviewer", id)
+    }
+
+    /** Клиент проверяющей нейросети; null — файловые действия решает пользователь. */
+    private fun makeReviewer(): LlmClient? {
+        if (rootReviewMode != "ai") return null
+        val p = profiles.firstOrNull { it.id == rootReviewerId } ?: return null
+        return makeLlm(settings.copy(provider = p.provider, baseUrl = p.baseUrl, apiKey = p.apiKey), p.model)
     }
 
     /** off — мост выключен (по умолчанию), ask — каждый запрос подтверждается вручную. */
@@ -4294,7 +4354,21 @@ class ChatController(
         ) return true
         if (unattended) return false
         if (editsAllowedThisRun && (tool == "write_file" || tool == "edit_file")) return true
-        return approvalMutex.withLock { askApproval(tool, description) }
+        var shown = description
+        // Авто-режим не перебивает правило пользователя «ask»
+        if (rootAuto && PermissionRules.decide(settings.permissionRules, tool, description) != Decision.ASK) {
+            when (val v = RootAuto.decide(tool, description, makeReviewer())) {
+                is AutoVerdict.Approve -> {
+                    logAuto("✓ $tool: " + description.lineSequence().first())
+                    return true
+                }
+                is AutoVerdict.AskUser -> {
+                    logAuto("? $tool: " + v.reason.ifBlank { "спросил тебя" })
+                    if (v.reason.isNotBlank()) shown = "⚠ ${v.reason}\n\n$description"
+                }
+            }
+        }
+        return approvalMutex.withLock { askApproval(tool, shown) }
     }
 
     private suspend fun askApproval(tool: String, description: String): Boolean {

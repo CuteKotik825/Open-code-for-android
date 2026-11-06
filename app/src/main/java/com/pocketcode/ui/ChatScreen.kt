@@ -194,6 +194,19 @@ fun ChatScreen(
                 .padding(padding)
                 .fillMaxSize(),
         ) {
+            if (vm.rootAuto) {
+                androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (vm.rootReviewMode == "ai") "Авто-режим: файлы проверяет нейросеть" else "Авто-режим: файлы одобряешь ты",
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                        TextButton(onClick = { vm.setRootAuto(false) }) { Text("Выключить") }
+                    }
+                }
+            }
             if (vm.contextUsed > 0) {
                 val limit = vm.effectiveContext.coerceAtLeast(1)
                 val frac = (vm.contextUsed.toFloat() / limit).coerceIn(0f, 1f)
