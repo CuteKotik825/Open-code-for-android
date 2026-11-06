@@ -13,8 +13,8 @@ import kotlin.coroutines.cancellation.CancellationException
 
 /** Что делать с действием в авто-режиме. */
 sealed class AutoVerdict {
-    /** Выполнять без вопросов. */
-    object Approve : AutoVerdict()
+    /** Выполнять без вопросов; reason — что сказала проверяющая нейросеть (может быть пусто). */
+    class Approve(val reason: String = "") : AutoVerdict()
 
     /** Спросить пользователя; reason — почему (может быть пустым). */
     data class AskUser(val reason: String) : AutoVerdict()
@@ -79,6 +79,9 @@ object RootAuto {
         // принудительная отправка в git
         rx("""\bpush\b[^\n;|&]*(--force|--force-with-lease|\s-f\b)"""),
     )
+
+    /** Удаление: такие действия при включённой «двойной проверке» одобряют две нейросети. */
+    private val DELETE = rx("""(^|[\s;&|(])(rm|rmdir|unlink|shred)(\s|$)|\bgit\s+clean\b|-delete\b|\bos\.(remove|unlink|rmdir)\b|\brmtree\b""")
 
     private val REVIEW_SYSTEM = """
 You are a safety reviewer for an autonomous coding agent running on a user's Android phone.
@@ -152,21 +155,52 @@ Reply with ONLY one JSON object and nothing else: {"safe": true or false, "reaso
         return parseVerdict(text)
     }
 
-    /** Главное решение. reviewer == null — файловые действия решает пользователь. */
-    suspend fun decide(tool: String, description: String, reviewer: LlmClient?): AutoVerdict =
+    /** Похоже ли действие на удаление файлов. */
+    fun isDelete(tool: String, description: String): Boolean =
+        (tool in SHELL_TOOLS || tool in CODE_TOOLS) && DELETE.containsMatchIn(description)
+
+    /**
+     * Главное решение. reviewer == null: файловые действия решает пользователь.
+     * Если doubleDelete включён, удаление должны одобрить две нейросети (reviewer и second).
+     */
+    suspend fun decide(
+        tool: String,
+        description: String,
+        reviewer: LlmClient?,
+        second: LlmClient? = null,
+        doubleDelete: Boolean = false,
+    ): AutoVerdict =
         when (classify(tool, description)) {
-            ActionKind.OTHER -> AutoVerdict.Approve
+            ActionKind.OTHER -> AutoVerdict.Approve()
             ActionKind.ALWAYS_USER -> AutoVerdict.AskUser("Опасная операция, её всегда подтверждаешь ты")
             ActionKind.FILE_CHANGE ->
                 if (reviewer == null) {
                     AutoVerdict.AskUser("")
                 } else {
-                    val r = review(reviewer, tool, description)
-                    when {
-                        r == null -> AutoVerdict.AskUser("Проверяющая нейросеть не ответила за ${REVIEW_TIMEOUT_MS / 1000} с")
-                        r.safe -> AutoVerdict.Approve
-                        else -> AutoVerdict.AskUser("Проверяющая нейросеть не одобрила" + if (r.reason.isNotBlank()) ": ${r.reason}" else "")
-                    }
+                    verdictFor(reviewer, second, doubleDelete && isDelete(tool, description), tool, description)
                 }
         }
+
+    private suspend fun verdictFor(
+        reviewer: LlmClient,
+        second: LlmClient?,
+        needSecond: Boolean,
+        tool: String,
+        description: String,
+    ): AutoVerdict {
+        val secs = REVIEW_TIMEOUT_MS / 1000
+        val r = review(reviewer, tool, description)
+            ?: return AutoVerdict.AskUser("Проверяющая нейросеть не ответила за $secs с")
+        if (!r.safe) {
+            return AutoVerdict.AskUser("Проверяющая нейросеть не одобрила" + if (r.reason.isNotBlank()) ": ${r.reason}" else "")
+        }
+        if (!needSecond) return AutoVerdict.Approve(r.reason)
+        if (second == null) return AutoVerdict.AskUser("Для удаления нужна вторая проверяющая нейросеть, а она не выбрана")
+        val r2 = review(second, tool, description)
+            ?: return AutoVerdict.AskUser("Вторая проверяющая нейросеть не ответила за $secs с")
+        if (!r2.safe) {
+            return AutoVerdict.AskUser("Вторая проверяющая нейросеть не одобрила удаление" + if (r2.reason.isNotBlank()) ": ${r2.reason}" else "")
+        }
+        return AutoVerdict.Approve(r.reason)
+    }
 }

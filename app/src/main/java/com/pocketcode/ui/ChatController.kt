@@ -54,6 +54,8 @@ import com.pocketcode.agent.PermissionRules
 import com.pocketcode.agent.Decision
 import com.pocketcode.agent.RootAuto
 import com.pocketcode.agent.AutoVerdict
+import com.pocketcode.agent.ActionKind
+import com.pocketcode.agent.ProjectMap
 import com.pocketcode.tools.PresentPlanTool
 import com.pocketcode.tools.TodoTool
 import com.pocketcode.tools.looksBinary
@@ -349,6 +351,10 @@ class ChatController(
     var freeStartBusy by mutableStateOf(false)
         private set
     var freeStartMsg by mutableStateOf<String?>(null)
+
+    /** Установка не удалась: карточка предлагает запасной путь через ключ бесплатного провайдера. */
+    var freeStartFailed by mutableStateOf(false)
+        private set
         private set
 
     /** Новичку без ключей показываем кнопку «Начать бесплатно», пока он её не скроет или не подключит модель. */
@@ -365,9 +371,11 @@ class ChatController(
         if (running || linuxBusy || freeStartBusy || termBusy) return
         if (!linuxSupported) {
             freeStartMsg = "Встроенный Linux на этом телефоне не поддерживается. Подключи модель по ключу: Агент → Модель и ключи."
+            freeStartFailed = true
             return
         }
         freeStartBusy = true
+        freeStartFailed = false
         scope.launch {
             try {
                 if (!linuxEnv.isInstalled()) {
@@ -394,6 +402,7 @@ class ChatController(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
+                freeStartFailed = true
                 freeStartMsg = (e.message ?: "ошибка") + "\nЕсли загрузка обрывается, включи VPN и нажми кнопку ещё раз."
             } finally {
                 freeStartBusy = false
@@ -446,6 +455,7 @@ class ChatController(
         rootAutoJob = null
         rootAuto = on
         if (on) {
+            synchronized(autoStamps) { autoStamps.clear() }
             logAuto("Авто-режим включён на 2 часа")
             rootAutoJob = scope.launch {
                 delay(RootAuto.MAX_ON_MS)
@@ -474,6 +484,34 @@ class ChatController(
     fun setAutoRouteValue(v: Boolean) {
         autoRoute = v
         settingsStore.rawPut("autoRoute", if (v) "1" else "0")
+    }
+
+    /** Выключатели умных функций (предохранитель, корзина, двойная проверка, карта проекта и др.). */
+    val smart = SmartFeatures(settingsStore)
+
+    private val autoStamps = ArrayDeque<Long>()
+
+    /** true, если за последние 10 минут уже одобрено столько файловых действий, сколько разрешает предохранитель. */
+    private fun breakerTripped(): Boolean = synchronized(autoStamps) {
+        val now = System.currentTimeMillis()
+        while (autoStamps.isNotEmpty() && now - autoStamps.first() > 10 * 60_000L) autoStamps.removeFirst()
+        autoStamps.size >= smart.breakerLimit
+    }
+
+    private fun noteAutoApproval() {
+        synchronized(autoStamps) { autoStamps.addLast(System.currentTimeMillis()) }
+    }
+
+    /** Короткая строка в ленте чата. */
+    private fun postNote(text: String) {
+        scope.launch { items += UiItem.Notice(text) }
+    }
+
+    /** Вторая проверяющая нейросеть для удаления; null — не выбрана или двойная проверка выключена. */
+    private fun makeSecondReviewer(): LlmClient? {
+        if (rootReviewMode != "ai" || !smart.doubleDelete) return null
+        val p = profiles.firstOrNull { it.id == smart.secondReviewer } ?: return null
+        return makeLlm(settings.copy(provider = p.provider, baseUrl = p.baseUrl, apiKey = p.apiKey), p.model)
     }
 
     /** Клиент проверяющей нейросети; null — файловые действия решает пользователь. */
@@ -4425,14 +4463,30 @@ class ChatController(
         var shown = description
         // Авто-режим не перебивает правило пользователя «ask»
         if (rootAuto && PermissionRules.decide(settings.permissionRules, tool, description) != Decision.ASK) {
-            when (val v = RootAuto.decide(tool, description, makeReviewer())) {
-                is AutoVerdict.Approve -> {
-                    logAuto("✓ $tool: " + description.lineSequence().first())
-                    return true
+            val kind = RootAuto.classify(tool, description)
+            if (kind == ActionKind.FILE_CHANGE && smart.breakerOn && breakerTripped()) {
+                scope.launch {
+                    setRootAutoValue(false)
+                    postNote("Авто-режим остановлен предохранителем: за 10 минут одобрено ${smart.breakerLimit} файловых действий. Если всё идёт как надо, включи его снова.")
                 }
-                is AutoVerdict.AskUser -> {
-                    logAuto("? $tool: " + v.reason.ifBlank { "спросил тебя" })
-                    if (v.reason.isNotBlank()) shown = "⚠ ${v.reason}\n\n$description"
+                logAuto("! предохранитель сработал")
+                shown = "⚠ Предохранитель: слишком много файловых действий подряд, авто-режим выключен.\n\n$description"
+            } else {
+                when (val v = RootAuto.decide(tool, description, makeReviewer(), makeSecondReviewer(), smart.doubleDelete)) {
+                    is AutoVerdict.Approve -> {
+                        if (kind == ActionKind.FILE_CHANGE) {
+                            noteAutoApproval()
+                            if (smart.verdictNotes) {
+                                postNote("✓ Проверка пройдена: " + description.lineSequence().first().take(120) + if (v.reason.isNotBlank()) " — ${v.reason}" else "")
+                            }
+                        }
+                        logAuto("✓ $tool: " + description.lineSequence().first())
+                        return true
+                    }
+                    is AutoVerdict.AskUser -> {
+                        logAuto("? $tool: " + v.reason.ifBlank { "спросил тебя" })
+                        if (v.reason.isNotBlank()) shown = "⚠ ${v.reason}\n\n$description"
+                    }
                 }
             }
         }
@@ -4479,7 +4533,7 @@ class ChatController(
             EditFileTool(workspace),
             ListDirTool(workspace),
             GrepTool(workspace),
-            BashTool(workspace, shell),
+            BashTool(workspace, com.pocketcode.tools.TrashShell(shell) { smart.trashOn }),
             PythonTool(workspace, python),
             if (linuxActive) LinuxGitTool(workspace, shell) else GitTool(workspace, homeDir) { settings },
         )
@@ -4527,6 +4581,12 @@ class ChatController(
             instructions = listOfNotNull(
                 runCatching { extensions.projectInstructions() }.getOrNull(),
                 runCatching { extensions.projectNotes() }.getOrNull()?.let { "[Заметки проекта, записаны агентом ранее]\n$it" },
+                if (smart.memoryOn) {
+                    runCatching { ProjectMap.build(workspace.root) }.getOrNull()?.takeIf { it.isNotBlank() }
+                        ?.let { "[Карта проекта: собрана автоматически при начале чата и может устареть, перед важными правками проверяй инструментами]\n$it" }
+                } else {
+                    null
+                },
             ).joinToString("\n\n").ifEmpty { null },
             skills = skills,
         )
@@ -4541,7 +4601,7 @@ class ChatController(
                 val shell2: Shell = if (linuxActive) LinuxShell(linuxEnv, ws2) else androidShell
                 tools2 = listOf(
                     ReadFileTool(ws2), WriteFileTool(ws2), EditFileTool(ws2), ListDirTool(ws2), GrepTool(ws2),
-                    BashTool(ws2, shell2), PythonTool(ws2, python), CodeSearchTool(ws2),
+                    BashTool(ws2, com.pocketcode.tools.TrashShell(shell2) { smart.trashOn }), PythonTool(ws2, python), CodeSearchTool(ws2),
                     DiagnosticsTool(ws2, python, shell2) { emptyList() },
                 )
                 finish = { wt.merge() }
@@ -4560,7 +4620,13 @@ class ChatController(
             ) to finish
         }
         val created = Agent(
-            llm = if (helper != null) com.pocketcode.llm.RoutingLlm(llm, helper) { autoRoute } else llm,
+            llm = if (helper != null) {
+                com.pocketcode.llm.RoutingLlm(llm, helper, { autoRoute }) {
+                    if (smart.routeNotes) postNote("Простой вопрос: отвечает модель-помощник (${s.helperModel.trim()}).")
+                }
+            } else {
+                llm
+            },
             tools = tools + listOf(SpawnTool(workers, workerFactory), WorkerResultTool(workers)),
             system = sysPrompt,
             autoApprove = s.autoApprove,
@@ -4571,6 +4637,7 @@ class ChatController(
             helperLlm = helper,
             eco = s.ecoMode,
             askEvenIfAuto = { rootAuto },
+            keepTail = { smart.smartTrim },
             approve = ::requestApproval,
             history = history,
             pollNotes = { generateSequence { notes.poll() }.toList() },

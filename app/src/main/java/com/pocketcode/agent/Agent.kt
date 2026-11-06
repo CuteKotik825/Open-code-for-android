@@ -62,6 +62,8 @@ class Agent(
     private val eco: Boolean = false,
     /** true — спрашивать (approve) даже при autoApprove: так авто-режим root может проверять файловые действия. */
     private val askEvenIfAuto: () -> Boolean = { false },
+    /** true — длинный вывод режется с сохранением начала и конца, false — только начала. */
+    private val keepTail: () -> Boolean = { true },
 ) {
     private var llm: LlmClient = llm
     private var usedFallback = false
@@ -234,9 +236,13 @@ class Agent(
                 }
                 if (output.length > MAX_TOOL_OUTPUT) {
                     // Начало и конец важнее середины: в конце логов сборки и тестов обычно сама ошибка
-                    val head = MAX_TOOL_OUTPUT * 6 / 10
-                    val tail = MAX_TOOL_OUTPUT - head
-                    output = output.take(head) + "\n... (вывод обрезан: пропущено ${output.length - MAX_TOOL_OUTPUT} символов из середины) ...\n" + output.takeLast(tail)
+                    if (keepTail()) {
+                        val head = MAX_TOOL_OUTPUT * 6 / 10
+                        val tail = MAX_TOOL_OUTPUT - head
+                        output = output.take(head) + "\n... (вывод обрезан: пропущено ${output.length - MAX_TOOL_OUTPUT} символов из середины) ...\n" + output.takeLast(tail)
+                    } else {
+                        output = output.take(MAX_TOOL_OUTPUT) + "\n... (вывод обрезан)"
+                    }
                 }
                 send(AgentEvent.ToolResult(call.name, output, isError))
                 results += Block.ToolResult(call.id, output, isError)

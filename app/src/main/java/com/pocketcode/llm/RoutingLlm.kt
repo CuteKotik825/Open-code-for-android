@@ -10,15 +10,26 @@ class RoutingLlm(
     private val cheap: LlmClient,
     /** Включён ли автовыбор сейчас (можно менять на лету). */
     private val enabled: () -> Boolean,
+    /** Вызывается один раз на сообщение пользователя, когда ответ отдан дешёвой модели. */
+    private val onCheap: () -> Unit = {},
 ) : LlmClient {
+    private var lastNoted: Message? = null
+
     override suspend fun complete(
         system: String,
         messages: List<Message>,
         tools: List<ToolSpec>,
         onTextDelta: (String) -> Unit,
     ): LlmResponse {
-        val target = if (enabled() && isSimpleQuestion(messages)) cheap else main
-        return target.complete(system, messages, tools, onTextDelta)
+        val useCheap = enabled() && isSimpleQuestion(messages)
+        if (useCheap) {
+            val msg = lastUserText(messages)
+            if (msg !== lastNoted) {
+                lastNoted = msg
+                onCheap()
+            }
+        }
+        return (if (useCheap) cheap else main).complete(system, messages, tools, onTextDelta)
     }
 
     companion object {
@@ -37,9 +48,12 @@ class RoutingLlm(
             "what", "why", "how", "explain", "tell me",
         )
 
+        private fun lastUserText(messages: List<Message>): Message? =
+            messages.lastOrNull { m -> m.role == "user" && m.blocks.any { it is Block.Text } }
+
         /** true — последнее сообщение пользователя похоже на короткий вопрос без просьбы что-то менять. */
         fun isSimpleQuestion(messages: List<Message>): Boolean {
-            val last = messages.lastOrNull { m -> m.role == "user" && m.blocks.any { it is Block.Text } } ?: return false
+            val last = lastUserText(messages) ?: return false
             if (last.blocks.any { it is Block.Image }) return false
             val text = last.blocks.filterIsInstance<Block.Text>().joinToString(" ") { it.text }.trim()
             if (text.isEmpty() || text.length > MAX_SIMPLE_CHARS || text.contains("```")) return false
