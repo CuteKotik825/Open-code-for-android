@@ -147,7 +147,7 @@ fun OcSessionsScreen(vm: ChatController, onBack: () -> Unit, onOpened: () -> Uni
                         visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                     )
                     Text(
-                        if (vm.rpmLimit > 0) "Лимит запросов: ${vm.rpmLimit} в минуту — применяется к этому провайдеру автоматически. Менять: Модели → «Частота запросов»." else "Лимит запросов выключен. Если у сервиса есть ограничение (например, 1 запрос в минуту), включи его в Модели → «Частота запросов» — он подхватится сам.",
+                        if (vm.rpmLimit > 0) "Лимит запросов: ${vm.rateText()} — применяется к этому провайдеру автоматически. Менять: Модели → «Частота запросов»." else "Лимит запросов выключен. Если у сервиса есть ограничение (например, 1 запрос в минуту), включи его в Модели → «Частота запросов» — он подхватится сам.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Button(onClick = { cMsg = vm.ocCustomSet(cId, cUrl, cModel, cKey); cKey = "" }, enabled = cUrl.isNotBlank() && cModel.isNotBlank()) { Text("Сохранить провайдер") }

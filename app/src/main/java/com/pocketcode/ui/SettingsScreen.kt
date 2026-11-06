@@ -263,6 +263,49 @@ fun SettingsScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            run {
+                var source by remember { mutableStateOf(if (vm.savedModels.isNotEmpty()) "saved" else "server") }
+                var filter by remember { mutableStateOf("") }
+                Text("Выбор модели", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = source == "server", onClick = { source = "server" }, label = { Text("С сервера (${vm.fetchedModels.size})") })
+                    FilterChip(selected = source == "saved", onClick = { source = "saved" }, label = { Text("Мои сохранённые (${vm.savedModels.size})") })
+                }
+                if (source == "server") {
+                    OutlinedButton(
+                        onClick = { vm.loadModelList(provider, baseUrl, apiKey) },
+                        enabled = !vm.modelsBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(if (vm.modelsBusy) "Загружаю…" else "Загрузить список с сервера по этому адресу") }
+                    vm.modelsMsg?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    if (vm.fetchedModels.size > 12) {
+                        OutlinedTextField(
+                            value = filter,
+                            onValueChange = { filter = it },
+                            label = { Text("Поиск по списку") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+                val shown = (if (source == "server") vm.fetchedModels else vm.savedModels)
+                    .filter { filter.isBlank() || it.contains(filter.trim(), ignoreCase = true) }
+                    .take(60)
+                if (shown.isEmpty() && source == "saved") {
+                    Text("Пока пусто. Впиши модель выше и нажми «Сохранить эту модель».", style = MaterialTheme.typography.bodySmall)
+                }
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    shown.forEach { m -> FilterChip(selected = model == m, onClick = { model = m }, label = { Text(m) }) }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { vm.saveModelName(model) }, enabled = model.isNotBlank() && model.trim() !in vm.savedModels, modifier = Modifier.weight(1f)) {
+                        Text("Сохранить эту модель")
+                    }
+                    if (source == "saved" && model.trim() in vm.savedModels) {
+                        OutlinedButton(onClick = { vm.forgetModelName(model.trim()) }, modifier = Modifier.weight(1f)) { Text("Убрать из сохранённых") }
+                    }
+                }
+            }
             OutlinedTextField(
                 value = apiKey,
                 onValueChange = { apiKey = it },
@@ -328,16 +371,58 @@ fun SettingsScreen(
             }
             Text("Частота запросов", style = MaterialTheme.typography.titleMedium, modifier = sec("rate").padding(top = 8.dp))
             Text(
-                "Сколько запросов к модели можно отправлять в минуту. Нужно, если у сервиса есть лимит (например, бесплатные модели часто дают 1 запрос в минуту): без этого получаешь ошибку 429. Приложение само подождёт нужное время между запросами. Лимит общий для встроенного агента и для OpenCode/Claude Code через ограничитель ниже.",
+                "Сколько запросов к модели можно отправлять и за какое время (например, 3 запроса за 10 минут или 200 за час). Нужно, если у сервиса есть лимит (например, бесплатные модели часто дают 1 запрос в минуту): без этого получаешь ошибку 429. Приложение само подождёт нужное время между запросами. Лимит общий для встроенного агента и для OpenCode/Claude Code через ограничитель ниже.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf(1, 2, 5, 10, 20, 30, 60, 0).forEach { v ->
-                    FilterChip(selected = vm.rpmLimit == v, onClick = { vm.setRpmLimitValue(v) }, label = { Text(if (v == 0) "Без лимита" else "$v/мин") })
+            run {
+                // Число запросов и период настраиваются отдельно: «N запросов за M секунд / минут / часов»
+                val initUnit = when {
+                    vm.ratePeriodSec % 3600 == 0 -> 3600
+                    vm.ratePeriodSec % 60 == 0 -> 60
+                    else -> 1
+                }
+                var countText by remember { mutableStateOf(if (vm.rpmLimit > 0) vm.rpmLimit.toString() else "") }
+                var unit by remember { mutableStateOf(initUnit) }
+                var amountText by remember { mutableStateOf((vm.ratePeriodSec / initUnit).toString()) }
+                fun apply(count: String, amount: String, u: Int) {
+                    val c = count.toIntOrNull() ?: 0
+                    val m = amount.toIntOrNull() ?: 0
+                    vm.setRatePeriodValue(if (m > 0) m * u else 60)
+                    vm.setRpmLimitValue(c.coerceIn(0, 100000))
+                }
+                OutlinedTextField(
+                    value = countText,
+                    onValueChange = { countText = it.filter(Char::isDigit).take(5); apply(countText, amountText, unit) },
+                    label = { Text("Сколько запросов (пусто — без лимита)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = amountText,
+                    onValueChange = { amountText = it.filter(Char::isDigit).take(4); apply(countText, amountText, unit) },
+                    label = { Text("За какое время") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(1 to "секунд", 60 to "минут", 3600 to "часов").forEach { (u, name) ->
+                        FilterChip(selected = unit == u, onClick = { unit = u; apply(countText, amountText, u) }, label = { Text(name) })
+                    }
+                }
+                Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(Triple(1, 1, 60), Triple(5, 1, 60), Triple(20, 1, 60), Triple(100, 1, 3600), Triple(0, 1, 60)).forEach { (c, m, u) ->
+                        FilterChip(
+                            selected = false,
+                            onClick = { countText = if (c > 0) c.toString() else ""; amountText = m.toString(); unit = u; apply(countText, amountText, u) },
+                            label = { Text(if (c == 0) "Без лимита" else "$c за ${if (u == 60) "$m мин" else "$m ч"}") },
+                        )
+                    }
                 }
             }
             Text(
-                if (vm.rpmLimit > 0) "Сейчас: не чаще 1 запроса в ${"%.0f".format(60.0 / vm.rpmLimit)} с. Агент может казаться «зависшим» — он просто ждёт очереди." else "Сейчас без ограничений.",
+                if (vm.rpmLimit > 0) "Сейчас: не больше ${vm.rateText()}. Пока в окне есть место, запросы идут сразу, потом агент ждёт и может казаться «зависшим»." else "Сейчас без ограничений.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(

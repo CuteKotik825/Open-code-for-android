@@ -2281,6 +2281,51 @@ class ChatController(
 
     private fun norm(s: String) = s.lowercase().substringAfterLast('/').replace(Regex("[^a-z0-9]"), "")
 
+    /** Модели, полученные с сервиса по адресу профиля (кнопка «Загрузить список»). */
+    var fetchedModels by mutableStateOf<List<String>>(emptyList())
+        private set
+    var modelsBusy by mutableStateOf(false)
+        private set
+    var modelsMsg by mutableStateOf<String?>(null)
+        private set
+
+    /** Модели, которые пользователь сохранил вручную. */
+    var savedModels by mutableStateOf(
+        (settingsStore.rawGet("savedModels") ?: "").lines().map { it.trim() }.filter { it.isNotEmpty() },
+    )
+        private set
+
+    private fun writeSavedModels(list: List<String>) {
+        savedModels = list
+        settingsStore.rawPut("savedModels", list.joinToString("\n"))
+    }
+
+    fun saveModelName(name: String) {
+        val n = name.trim()
+        if (n.isNotEmpty() && n !in savedModels) writeSavedModels(savedModels + n)
+    }
+
+    fun forgetModelName(name: String) = writeSavedModels(savedModels - name)
+
+    fun loadModelList(provider: com.pocketcode.Provider, baseUrl: String, apiKey: String) {
+        if (modelsBusy) return
+        modelsBusy = true
+        modelsMsg = "Загружаю список…"
+        scope.launch {
+            try {
+                val list = com.pocketcode.llm.ModelList.fetch(provider, baseUrl, apiKey)
+                fetchedModels = list
+                modelsMsg = if (list.isEmpty()) "Сервис вернул пустой список. Впиши модель вручную." else "Найдено моделей: ${list.size}"
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                modelsMsg = "Не удалось получить список (${e.message ?: "ошибка"}). Многие сервисы его не отдают: впиши модель вручную."
+            } finally {
+                modelsBusy = false
+            }
+        }
+    }
+
     fun verifyProfile(p: Profile) {
         if (verifyingId != null) return
         verifyingId = p.id
@@ -2462,7 +2507,7 @@ class ChatController(
 
     private val backupPrefKeys = listOf(
         "syncRepo", "syncProjects", "syncInterval", "syncHost", "ocFallback", "ocAutoSwitch", "ocAutoCompact", "ocRateRetryMin",
-        "hostMode", "rootDelay", "rpmLimit", "ocBudget", "ocListLim", "ocShowLim", "ocFresh", "ocExtMode", "ocModel", "ocCards", "themeMode", "palette", "amoled", "templates", "stars", "ocPins", "ocTitles", "bigInput",
+        "hostMode", "rootDelay", "rpmLimit", "ratePeriod", "savedModels", "ocBudget", "ocListLim", "ocShowLim", "ocFresh", "ocExtMode", "ocModel", "ocCards", "themeMode", "palette", "amoled", "templates", "stars", "ocPins", "ocTitles", "bigInput",
     )
 
     private fun cryptKey(password: String, salt: ByteArray): javax.crypto.spec.SecretKeySpec {
@@ -3144,7 +3189,27 @@ class ChatController(
     /** Запросов к модели в минуту (0 = без ограничений). Общий лимит для агента приложения и для локального прокси. */
     var rpmLimit by mutableIntStateOf(settingsStore.rawGet("rpmLimit")?.toIntOrNull() ?: 0)
         private set
-    fun setRpmLimitValue(v: Int) { rpmLimit = v; RateGate.perMinute = v; settingsStore.rawPut("rpmLimit", v.toString()); ocApplyRate() }
+    fun setRpmLimitValue(v: Int) { rpmLimit = v; RateGate.configure(rpmLimit, ratePeriodSec); settingsStore.rawPut("rpmLimit", v.toString()); ocApplyRate() }
+
+    /** За какой промежуток действует лимит запросов, в секундах (по умолчанию минута). */
+    var ratePeriodSec by mutableIntStateOf(settingsStore.rawGet("ratePeriod")?.toIntOrNull()?.coerceAtLeast(1) ?: 60)
+        private set
+
+    fun setRatePeriodValue(sec: Int) {
+        ratePeriodSec = sec.coerceIn(1, 7 * 24 * 3600)
+        RateGate.configure(rpmLimit, ratePeriodSec)
+        settingsStore.rawPut("ratePeriod", ratePeriodSec.toString())
+    }
+
+    /** Лимит словами: «5 запросов за 10 мин». */
+    fun rateText(): String {
+        val per = when {
+            ratePeriodSec % 3600 == 0 -> "${ratePeriodSec / 3600} ч"
+            ratePeriodSec % 60 == 0 -> "${ratePeriodSec / 60} мин"
+            else -> "$ratePeriodSec с"
+        }
+        return "$rpmLimit за $per"
+    }
 
     private fun rateUnwrap(u: String): String {
         val m = Regex("^http://127\\.0\\.0\\.1:${com.pocketcode.llm.RateProxy.PORT}/t/[^/]+/([A-Za-z0-9_-]+)$").find(u.trimEnd('/')) ?: return u
@@ -3180,7 +3245,7 @@ class ChatController(
     private val rateProxy = com.pocketcode.llm.RateProxy(rateToken)
     var rateProxyOk by mutableStateOf(false)
         private set
-    init { RateGate.perMinute = rpmLimit; rateProxyOk = rateProxy.start(); if (rpmLimit > 0) ocApplyRate() }
+    init { RateGate.configure(rpmLimit, ratePeriodSec); rateProxyOk = rateProxy.start(); if (rpmLimit > 0) ocApplyRate() }
 
     /** Адрес сервиса, завёрнутый в локальный прокси с лимитом. Его вставляют как Base URL в Claude Code / OpenCode / что угодно. */
     fun rateWrapUrl(upstream: String): String = com.pocketcode.llm.RateProxy.wrap(rateToken, upstream.trim())
@@ -3865,7 +3930,7 @@ class ChatController(
             if (useKey.isNotEmpty()) Secrets.known = Secrets.known + useKey
             setOcModelValue("$id/$m")
             refreshOcCustom()
-            "Провайдер «$id» сохранён, модель выбрана: $id/$m." + (if (rpmLimit > 0) " Лимит: $rpmLimit запросов в минуту (применён автоматически)." else "") + " Включи режим OpenCode и пиши."
+            "Провайдер «$id» сохранён, модель выбрана: $id/$m." + (if (rpmLimit > 0) " Лимит: ${rateText()} (применён автоматически)." else "") + " Включи режим OpenCode и пиши."
         } catch (e: Throwable) { "Не удалось записать: ${e.message}" }
     }
 
