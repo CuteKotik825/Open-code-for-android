@@ -231,7 +231,10 @@ class Agent(
                     }
                 }
                 if (output.length > MAX_TOOL_OUTPUT) {
-                    output = output.take(MAX_TOOL_OUTPUT) + "\n... (вывод обрезан)"
+                    // Начало и конец важнее середины: в конце логов сборки и тестов обычно сама ошибка
+                    val head = MAX_TOOL_OUTPUT * 6 / 10
+                    val tail = MAX_TOOL_OUTPUT - head
+                    output = output.take(head) + "\n... (вывод обрезан: пропущено ${output.length - MAX_TOOL_OUTPUT} символов из середины) ...\n" + output.takeLast(tail)
                 }
                 send(AgentEvent.ToolResult(call.name, output, isError))
                 results += Block.ToolResult(call.id, output, isError)

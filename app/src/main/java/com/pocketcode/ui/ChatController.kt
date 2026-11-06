@@ -467,6 +467,15 @@ class ChatController(
         settingsStore.rawPut("rootReviewer", id)
     }
 
+    /** Автовыбор модели: простые вопросы без правок идут на модель-помощник (нужна заполненная «Модель-помощник»). */
+    var autoRoute by mutableStateOf(settingsStore.rawGet("autoRoute") == "1")
+        private set
+
+    fun setAutoRouteValue(v: Boolean) {
+        autoRoute = v
+        settingsStore.rawPut("autoRoute", if (v) "1" else "0")
+    }
+
     /** Клиент проверяющей нейросети; null — файловые действия решает пользователь. */
     private fun makeReviewer(): LlmClient? {
         if (rootReviewMode != "ai") return null
@@ -4550,7 +4559,7 @@ class ChatController(
             ) to finish
         }
         val created = Agent(
-            llm = llm,
+            llm = if (helper != null) com.pocketcode.llm.RoutingLlm(llm, helper) { autoRoute } else llm,
             tools = tools + listOf(SpawnTool(workers, workerFactory), WorkerResultTool(workers)),
             system = sysPrompt,
             autoApprove = s.autoApprove,
