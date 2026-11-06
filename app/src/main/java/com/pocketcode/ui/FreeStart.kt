@@ -19,7 +19,7 @@ import androidx.compose.ui.unit.dp
 
 /** Карточка для новичка без ключей: одна кнопка ставит OpenCode с бесплатными моделями. */
 @Composable
-fun FreeStartCard(vm: ChatController) {
+fun FreeStartCard(vm: ChatController, onOpenModels: () -> Unit = {}) {
     Box(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp))
             .background(MaterialTheme.colorScheme.secondaryContainer).padding(20.dp),
@@ -35,6 +35,15 @@ fun FreeStartCard(vm: ChatController) {
             )
             vm.freeStartMsg?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
+            }
+            if (vm.freeStartFailed && !vm.freeStartBusy) {
+                Text(
+                    "Запасной путь: возьми бесплатный ключ у провайдера (например OpenRouter с моделями «:free» или Groq) " +
+                        "и вставь его в «Модели и ключи», там есть готовые шаблоны.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                TextButton(onClick = onOpenModels) { Text("Открыть «Модели и ключи»") }
             }
             if (vm.freeStartBusy) LinearProgressIndicator(Modifier.fillMaxWidth())
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

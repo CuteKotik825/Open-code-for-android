@@ -50,6 +50,11 @@ jobs:
             echo "Секретов нет: общий debug-ключ"
           fi
 
+      - name: Unit-тесты
+        run: |
+          set -o pipefail
+          gradle :app:testDebugUnitTest --no-daemon --stacktrace 2>&1 | tee test.log
+
       - name: Build debug APK
         run: |
           set -o pipefail
@@ -63,7 +68,7 @@ jobs:
       - name: Show build errors
         if: failure()
         run: |
-          msg=$(grep -E "^e: |What went wrong|Caused by|error:|Could not|FAILURE" -A4 build.log | head -80 | cut -c1-400)
+          msg=$(cat test.log build.log 2>/dev/null | grep -E "^e: |What went wrong|Caused by|error:|Could not|FAILURE|FAILED" -A4 | head -80 | cut -c1-400)
           msg="${msg//'%'/'%25'}"
           msg="${msg//$'\n'/'%0A'}"
           echo "::error title=Build errors::${msg}"

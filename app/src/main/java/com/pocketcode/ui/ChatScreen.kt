@@ -229,7 +229,7 @@ fun ChatScreen(
             }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (vm.items.isEmpty()) {
-                    EmptyHint(vm.workspacePath, welcome = if (!vm.welcomeSeen || vm.needsFreeStart) ({ Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { if (vm.needsFreeStart) FreeStartCard(vm); if (!vm.welcomeSeen) WelcomeCard(vm) { runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/pocket_code_github")).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) } } } }) else null) { input = it }
+                    EmptyHint(vm.workspacePath, welcome = if (!vm.welcomeSeen || vm.needsFreeStart) ({ Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { if (vm.needsFreeStart) FreeStartCard(vm, onOpenSettings); if (!vm.welcomeSeen) WelcomeCard(vm) { runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/pocket_code_github")).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) } } } }) else null) { input = it }
                 } else {
                     LazyColumn(
                         state = listState,
