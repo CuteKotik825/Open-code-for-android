@@ -351,10 +351,10 @@ class ChatController(
     var freeStartBusy by mutableStateOf(false)
         private set
     var freeStartMsg by mutableStateOf<String?>(null)
+        private set
 
     /** Установка не удалась: карточка предлагает запасной путь через ключ бесплатного провайдера. */
     var freeStartFailed by mutableStateOf(false)
-        private set
         private set
 
     /** Новичку без ключей показываем кнопку «Начать бесплатно», пока он её не скроет или не подключит модель. */
