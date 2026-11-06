@@ -60,6 +60,8 @@ class Agent(
     helperLlm: LlmClient? = null,
     /** Эко-режим: старые выводы инструментов урезаются быстрее. */
     private val eco: Boolean = false,
+    /** true — спрашивать (approve) даже при autoApprove: так авто-режим root может проверять файловые действия. */
+    private val askEvenIfAuto: () -> Boolean = { false },
 ) {
     private var llm: LlmClient = llm
     private var usedFallback = false
@@ -110,7 +112,7 @@ class Agent(
     private fun mustAsk(tool: Tool, input: kotlinx.serialization.json.JsonObject, d: Decision): Boolean = when (d) {
         Decision.ASK -> true
         Decision.ALLOW -> tool.alwaysAsk
-        else -> tool.needsApproval(input) && (tool.alwaysAsk || !autoApprove)
+        else -> tool.needsApproval(input) && (tool.alwaysAsk || !autoApprove || askEvenIfAuto())
     }
 
     fun execute(text: String, images: List<Block.Image> = emptyList()): Flow<AgentEvent> = channelFlow {

@@ -4556,6 +4556,7 @@ class ChatController(
                 contextLimit = ctxLimit,
                 maxSteps = if (s.maxSteps == 0) 0 else s.maxSteps * 2,
                 approve = { t, d -> requestApproval(t, d) },
+                askEvenIfAuto = { rootAuto },
             ) to finish
         }
         val created = Agent(
@@ -4569,6 +4570,7 @@ class ChatController(
             fallbackLlm = makeFallback(s),
             helperLlm = helper,
             eco = s.ecoMode,
+            askEvenIfAuto = { rootAuto },
             approve = ::requestApproval,
             history = history,
             pollNotes = { generateSequence { notes.poll() }.toList() },

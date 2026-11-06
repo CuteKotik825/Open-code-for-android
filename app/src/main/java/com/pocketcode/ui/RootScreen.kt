@@ -178,13 +178,6 @@ fun RootScreen(vm: ChatController, onBack: () -> Unit, onToChat: () -> Unit) {
                     )
                 }
                 Text("⚠ $AUTO_WARNING", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                if (vm.settings.autoApprove) {
-                    Text(
-                        "В настройках включено «выполнять без подтверждения»: при нём файловые действия не проверяются вообще. Выключи его, чтобы работала проверка.",
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
                 Text("Файловые действия одобряет:", style = MaterialTheme.typography.titleSmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     androidx.compose.material3.FilterChip(selected = vm.rootReviewMode == "me", onClick = { vm.setRootReviewModeValue("me") }, label = { Text("Я сам") })
