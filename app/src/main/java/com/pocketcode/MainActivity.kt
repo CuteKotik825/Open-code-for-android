@@ -71,7 +71,7 @@ import com.pocketcode.ui.ProjectsScreen
 import com.pocketcode.ui.SessionsScreen
 import com.pocketcode.ui.SettingsScreen
 
-private enum class Screen { CHAT, SETTINGS, SESSIONS, PROJECTS, FILES, DEVICES, PLUGINS, DIAG, COMPARE, CONTEXT, TERMINAL, GIT, OCSESSIONS, REMOTE, DIFF, SEARCH, HUB_PROJECT, HUB_AGENT, HUB_MORE, FIND, ROOT, OCSETTINGS, MODELS, LINUX, UPDATE, BACKUP, VIDEO, LANGUAGE }
+private enum class Screen { CHAT, SETTINGS, SESSIONS, PROJECTS, FILES, DEVICES, PLUGINS, DIAG, COMPARE, CONTEXT, TERMINAL, GIT, OCSESSIONS, REMOTE, DIFF, SEARCH, HUB_PROJECT, HUB_AGENT, HUB_MORE, FIND, ROOT, OCSETTINGS, MODELS, LINUX, UPDATE, BACKUP, VIDEO, LANGUAGE, SMART }
 
 class MainActivity : ComponentActivity() {
     private val controller: ChatController
@@ -285,6 +285,7 @@ class MainActivity : ComponentActivity() {
                                 com.pocketcode.ui.HubItem(Icons.Default.Settings, "Настройки", "Тема и вид, безопасность, правила, общие параметры") { openFrom(Screen.HUB_MORE, Screen.SETTINGS) },
                                 com.pocketcode.ui.HubItem(Icons.Default.Settings, "Язык интерфейса", com.pocketcode.ui.I18n.all.firstOrNull { it.code == com.pocketcode.ui.I18n.code }?.native ?: "") { openFrom(Screen.HUB_MORE, Screen.LANGUAGE) },
                                 com.pocketcode.ui.HubItem(Icons.Default.PlayArrow, "Среда Linux", "Установка мини-Linux, python, git, node", if (!pocketApp.controller.linuxInstalled && pocketApp.controller.linuxSupported) "не установлен" else null) { openFrom(Screen.HUB_MORE, Screen.LINUX) },
+                                com.pocketcode.ui.HubItem(Icons.Default.Star, "Умные функции", "Авто-режим, предохранитель, корзина, автовыбор модели, карта проекта", if (pocketApp.controller.rootAuto) "авто вкл" else null) { openFrom(Screen.HUB_MORE, Screen.SMART) },
                                 com.pocketcode.ui.HubItem(Icons.Default.Warning, "Root и Android", "Как дать агенту данные с телефона: четыре способа", if (pocketApp.controller.rootAuto) "авто-режим вкл" else if (pocketApp.controller.hostMode == "ask") "мост вкл" else null) { openFrom(Screen.HUB_MORE, Screen.ROOT) },
                                 com.pocketcode.ui.HubItem(Icons.Default.Phone, "Устройства", "ADB, root, подключённые устройства") { openFrom(Screen.HUB_MORE, Screen.DEVICES) },
                                 com.pocketcode.ui.HubItem(Icons.Default.Refresh, "Синхронизация и пульт", "Файлы между телефонами и задачи на другой телефон") { openFrom(Screen.HUB_MORE, Screen.REMOTE) },
@@ -445,6 +446,10 @@ class MainActivity : ComponentActivity() {
                     Screen.ROOT -> {
                         BackHandler { screen = backTo }
                         com.pocketcode.ui.RootScreen(pocketApp.controller, onBack = { screen = backTo }, onToChat = { screen = Screen.CHAT })
+                    }
+                    Screen.SMART -> {
+                        BackHandler { screen = backTo }
+                        com.pocketcode.ui.SmartScreen(pocketApp.controller, onBack = { screen = backTo }, onOpenRoot = { openFrom(Screen.SMART, Screen.ROOT) })
                     }
                     Screen.VIDEO -> {
                         BackHandler { screen = backTo }

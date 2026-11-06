@@ -396,16 +396,7 @@ fun SettingsScreen(
                     "а основная модель делает всю остальную работу. Пусто — везде основная.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Автовыбор модели", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "Короткие вопросы без просьбы что-то изменить идут на модель-помощник, остальное на основную. Работает, только если заполнена модель-помощник.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Switch(checked = vm.autoRoute, onCheckedChange = { vm.setAutoRouteValue(it) }, enabled = helperModel.isNotBlank())
-            }
+            Text("Автовыбор модели включается в «Ещё → Умные функции».", style = MaterialTheme.typography.bodySmall)
             Text("Резервный профиль", style = MaterialTheme.typography.titleSmall)
             Text(
                 "Если у основной модели кончилась квота, превышен лимит запросов или ключ не принят, агент сам перейдёт на выбранный профиль и продолжит.",
