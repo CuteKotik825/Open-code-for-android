@@ -322,6 +322,12 @@ fun SettingsScreen(
                 ) { Text(if (vm.verifyingId != null) "Проверяю…" else "Проверить модель") }
                 OutlinedButton(onClick = onOpenCompare, modifier = Modifier.weight(1f)) { Text("Сравнить модели") }
             }
+            OutlinedButton(
+                onClick = { vm.checkKeyQuick(provider, baseUrl, apiKey, model) },
+                enabled = !vm.modelsBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Быстро проверить ключ (бесплатно)") }
+            vm.keyCheckMsg?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             vm.verifyText?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             run {
                 val u = vm.usageMonth(activeId)
@@ -336,6 +342,35 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
             )
 
+            run {
+                @Suppress("UNUSED_VARIABLE") val ver = vm.profileRatesVersion
+                val own = vm.profileRate(activeId)
+                var cnt by remember(activeId) { mutableStateOf(own?.first?.toString() ?: "") }
+                var mins by remember(activeId) { mutableStateOf(((own?.second ?: 60) / 60).coerceAtLeast(1).toString()) }
+                Text("Свой лимит запросов для этого профиля", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Например, у бесплатного ключа 1 запрос в минуту, а у платного без ограничений. Пусто — действует общий лимит ниже. Работает для встроенного агента.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = cnt,
+                        onValueChange = { cnt = it.filter(Char::isDigit).take(5); vm.setProfileRate(activeId, cnt.toIntOrNull() ?: 0, (mins.toIntOrNull() ?: 1).coerceAtLeast(1) * 60) },
+                        label = { Text("Запросов") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = mins,
+                        onValueChange = { mins = it.filter(Char::isDigit).take(4); vm.setProfileRate(activeId, cnt.toIntOrNull() ?: 0, (mins.toIntOrNull() ?: 1).coerceAtLeast(1) * 60) },
+                        label = { Text("За минут") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
             OutlinedTextField(
                 value = contextTokens,
                 onValueChange = { contextTokens = it.filter(Char::isDigit).take(8) },
@@ -491,6 +526,20 @@ fun SettingsScreen(
                 androidx.compose.material3.FilterChip(selected = fallbackId.isEmpty(), onClick = { fallbackId = "" }, label = { Text("Нет") })
                 profiles.filter { it.id != activeId }.forEach { p ->
                     androidx.compose.material3.FilterChip(selected = fallbackId == p.id, onClick = { fallbackId = p.id }, label = { Text(p.label) })
+                }
+            }
+            if (fallbackId.isNotEmpty()) {
+                Text("Дальше по цепочке", style = MaterialTheme.typography.labelLarge)
+                Text("Если и резервный профиль не сработает, агент пойдёт по этим профилям по порядку выбора.", style = MaterialTheme.typography.bodySmall)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    profiles.filter { it.id != activeId && it.id != fallbackId }.forEach { p ->
+                        val pos = vm.fallbackChain.indexOf(p.id)
+                        androidx.compose.material3.FilterChip(
+                            selected = pos >= 0,
+                            onClick = { vm.toggleFallbackChain(p.id) },
+                            label = { Text(if (pos >= 0) "${pos + 2}. ${p.label}" else p.label) },
+                        )
+                    }
                 }
             }
             OutlinedTextField(

@@ -21,10 +21,24 @@ object RateGate {
 
     fun configure(count: Int, periodSec: Int) {
         synchronized(this) {
-            limit = count.coerceAtLeast(0)
-            periodMs = periodSec.coerceAtLeast(1) * 1000L
+            val c = count.coerceAtLeast(0)
+            val p = periodSec.coerceAtLeast(1) * 1000L
+            if (c == limit && p == periodMs) return
+            limit = c
+            periodMs = p
             stamps.clear()
         }
+    }
+
+    /** Сколько запросов уже занято в текущем окне и сколько секунд до освобождения места; для показа в чате. */
+    fun status(now: Long = System.currentTimeMillis()): Pair<Int, Long>? = synchronized(this) {
+        if (limit <= 0) return null
+        val used = stamps.count { now - it < periodMs }
+        val free = if (used < limit) 0L else {
+            val blocker = stamps.elementAt(stamps.size - limit)
+            maxOf(0L, blocker + periodMs - now)
+        }
+        used to free / 1000
     }
 
     /** Сервис ответил 429: следующие запросы не раньше чем через [ms] мс (Retry-After или минута с запасом). */
