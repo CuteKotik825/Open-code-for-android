@@ -506,25 +506,27 @@ class ChatController(
     /** Выключатели умных функций (предохранитель, корзина, двойная проверка, карта проекта и др.). */
     val smart = SmartFeatures(settingsStore)
 
-    /** Быстрые режимы: одним выбором меняют сразу несколько настроек. Возвращает описание того, что включено. */
+    /** Быстрые режимы: одним выбором меняют сразу несколько настроек. Возвращает описание того, что включено (уже переведённое). */
     fun applyPreset(name: String): String {
         return when (name) {
             "eco" -> {
                 saveSettings(settings.copy(ecoMode = true), profiles, activeProfileId)
                 smart.changeSmartTrim(true); smart.changeMemory(false)
-                if (settings.helperModel.isNotBlank()) setAutoRouteValue(true)
-                "Экономно: эко-режим вкл, умное сокращение вывода вкл, карта проекта выкл" + if (settings.helperModel.isNotBlank()) ", автовыбор модели вкл." else "."
+                val route = settings.helperModel.isNotBlank()
+                if (route) setAutoRouteValue(true)
+                I18n.t("Экономно: эко-режим вкл, умное сокращение вывода вкл, карта проекта выкл.") +
+                    if (route) " " + I18n.t("Автовыбор модели вкл.") else ""
             }
             "max" -> {
                 saveSettings(settings.copy(ecoMode = false), profiles, activeProfileId)
                 smart.changeSmartTrim(false); smart.changeMemory(true); setAutoRouteValue(false)
-                "Максимум качества: эко-режим выкл, автовыбор модели выкл, вывод инструментов режется без хвоста, карта проекта вкл."
+                I18n.t("Максимум качества: эко-режим выкл, автовыбор модели выкл, вывод инструментов режется без хвоста, карта проекта вкл.")
             }
             else -> {
                 saveSettings(settings.copy(ecoMode = true), profiles, activeProfileId)
                 smart.changeSmartTrim(true); smart.changeMemory(false)
                 smart.changeUndo(true); undo.enabled = true
-                "Для бесплатных моделей: эко-режим вкл, откат правок вкл. Лимит запросов задай отдельно в профиле."
+                I18n.t("Для бесплатных моделей: эко-режим вкл, откат правок вкл. Лимит запросов задай отдельно в профиле.")
             }
         }
     }
@@ -541,7 +543,7 @@ class ChatController(
     }
 
     fun rollbackLastTurn() {
-        postNote(undo.rollback())
+        postNote(undo.rollbackParts().joinToString(" ") { I18n.t(it) })
         undoVersion++
     }
 
@@ -1479,6 +1481,20 @@ class ChatController(
     fun finishTour() { tourDone = true; settingsStore.rawPut("tourDone", "1") }
     fun restartTour() { tourDone = false; settingsStore.rawPut("tourDone", "0") }
 
+    /** Пройденные уроки экрана «Обучение». */
+    var learnDone by mutableStateOf((settingsStore.rawGet("learnDone") ?: "").split(',').filter { it.isNotBlank() }.toSet())
+        private set
+
+    fun markLesson(id: String) {
+        learnDone = learnDone + id
+        settingsStore.rawPut("learnDone", learnDone.joinToString(","))
+    }
+
+    fun resetLessons() {
+        learnDone = emptySet()
+        settingsStore.rawPut("learnDone", "")
+    }
+
     var welcomeSeen by mutableStateOf(settingsStore.rawGet("welcomeSeen") == "1")
         private set
     fun hideWelcome() { welcomeSeen = true; settingsStore.rawPut("welcomeSeen", "1") }
@@ -1849,7 +1865,7 @@ class ChatController(
             }
             step("Согласованность настроек") {
                 val problems = settingsProblems()
-                require(problems.isEmpty()) { problems.joinToString("\n") { "• $it" } }
+                require(problems.isEmpty()) { problems.joinToString("\n") { "• " + I18n.t(it) } }
                 "противоречий нет"
             }
             step("Связь с моделью") {
@@ -2632,7 +2648,7 @@ class ChatController(
 
     private val backupPrefKeys = listOf(
         "syncRepo", "syncProjects", "syncInterval", "syncHost", "ocFallback", "ocAutoSwitch", "ocAutoCompact", "ocRateRetryMin",
-        "hostMode", "rootDelay", "rpmLimit", "ratePeriod", "savedModels", "fallbackChain", "profileRates", "sf_undo", "ocBudget", "ocListLim", "ocShowLim", "ocFresh", "ocExtMode", "ocModel", "ocCards", "themeMode", "palette", "amoled", "templates", "stars", "ocPins", "ocTitles", "bigInput",
+        "hostMode", "rootDelay", "rpmLimit", "ratePeriod", "learnDone", "savedModels", "fallbackChain", "profileRates", "sf_undo", "ocBudget", "ocListLim", "ocShowLim", "ocFresh", "ocExtMode", "ocModel", "ocCards", "themeMode", "palette", "amoled", "templates", "stars", "ocPins", "ocTitles", "bigInput",
     )
 
     private fun cryptKey(password: String, salt: ByteArray): javax.crypto.spec.SecretKeySpec {
@@ -3357,7 +3373,7 @@ class ChatController(
             ratePeriodSec % 60 == 0 -> "${ratePeriodSec / 60} мин"
             else -> "$ratePeriodSec с"
         }
-        return "$rpmLimit за $per"
+        return "$rpmLimit запросов (за $per)"
     }
 
     private fun rateUnwrap(u: String): String {
@@ -4692,7 +4708,7 @@ class ChatController(
                         if (kind == ActionKind.FILE_CHANGE) {
                             noteAutoApproval()
                             if (smart.verdictNotes) {
-                                postNote("✓ Проверка пройдена: " + description.lineSequence().first().take(120) + if (v.reason.isNotBlank()) " — ${v.reason}" else "")
+                                postNote(I18n.t("✓ Проверка пройдена:") + " " + description.lineSequence().first().take(120) + if (v.reason.isNotBlank()) " — ${v.reason}" else "")
                             }
                         }
                         logAuto("✓ $tool: " + description.lineSequence().first())
@@ -4700,7 +4716,7 @@ class ChatController(
                     }
                     is AutoVerdict.AskUser -> {
                         logAuto("? $tool: " + v.reason.ifBlank { "спросил тебя" })
-                        if (v.reason.isNotBlank()) shown = "⚠ ${v.reason}\n\n$description"
+                        if (v.reason.isNotBlank()) shown = "⚠ ${I18n.t(v.reason)}\n\n$description"
                     }
                 }
             }

@@ -71,7 +71,7 @@ import com.pocketcode.ui.ProjectsScreen
 import com.pocketcode.ui.SessionsScreen
 import com.pocketcode.ui.SettingsScreen
 
-private enum class Screen { CHAT, SETTINGS, SESSIONS, PROJECTS, FILES, DEVICES, PLUGINS, DIAG, COMPARE, CONTEXT, TERMINAL, GIT, OCSESSIONS, REMOTE, DIFF, SEARCH, HUB_PROJECT, HUB_AGENT, HUB_MORE, FIND, ROOT, OCSETTINGS, MODELS, LINUX, UPDATE, BACKUP, VIDEO, LANGUAGE, SMART }
+private enum class Screen { CHAT, SETTINGS, SESSIONS, PROJECTS, FILES, DEVICES, PLUGINS, DIAG, COMPARE, CONTEXT, TERMINAL, GIT, OCSESSIONS, REMOTE, DIFF, SEARCH, HUB_PROJECT, HUB_AGENT, HUB_MORE, FIND, ROOT, OCSETTINGS, MODELS, LINUX, UPDATE, BACKUP, VIDEO, LANGUAGE, SMART, LEARN }
 
 class MainActivity : ComponentActivity() {
     private val controller: ChatController
@@ -294,6 +294,7 @@ class MainActivity : ComponentActivity() {
                                 com.pocketcode.ui.HubItem(Icons.Default.Share, "Резервная копия", "Сохранить и восстановить настройки и ключи") { openFrom(Screen.HUB_MORE, Screen.BACKUP) },
                                 com.pocketcode.ui.HubItem(Icons.Default.Warning, "Диагностика и расход", "Проверка, расход токенов, очистка места") { openFrom(Screen.HUB_MORE, Screen.DIAG) },
                                 com.pocketcode.ui.hubHeader("Помощь"),
+                                com.pocketcode.ui.HubItem(Icons.Default.Info, "Обучение", "Уроки с практикой и мини-тестами по главным функциям", "${com.pocketcode.ui.LESSONS.count { it.id in pocketApp.controller.learnDone }}/${com.pocketcode.ui.LESSONS.size}") { openFrom(Screen.HUB_MORE, Screen.LEARN) },
                                 com.pocketcode.ui.HubItem(Icons.Default.Info, "Подсказки", "Показать обучение первого запуска ещё раз") { screen = Screen.CHAT; pocketApp.controller.restartTour() },
                                 com.pocketcode.ui.HubItem(Icons.Default.Favorite, "Поддержка", "Помощь, вопросы и идеи: группа PocketCode в Telegram") {
                                     runCatching { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/pocket_code_github"))) }
@@ -447,6 +448,26 @@ class MainActivity : ComponentActivity() {
                         BackHandler { screen = backTo }
                         com.pocketcode.ui.RootScreen(pocketApp.controller, onBack = { screen = backTo }, onToChat = { screen = Screen.CHAT })
                     }
+                    Screen.LEARN -> {
+                        BackHandler { screen = backTo }
+                        com.pocketcode.ui.LearnScreen(
+                            pocketApp.controller,
+                            onBack = { screen = backTo },
+                            onGo = { key ->
+                                val t = when (key) {
+                                    "models" -> Screen.MODELS
+                                    "smart" -> Screen.SMART
+                                    "root" -> Screen.ROOT
+                                    "diff" -> Screen.DIFF
+                                    "linux" -> Screen.LINUX
+                                    "diag" -> Screen.DIAG
+                                    else -> Screen.CHAT
+                                }
+                                openFrom(Screen.LEARN, t)
+                            },
+                            onTour = { screen = Screen.CHAT; pocketApp.controller.restartTour() },
+                        )
+                    }
                     Screen.SMART -> {
                         BackHandler { screen = backTo }
                         com.pocketcode.ui.SmartScreen(pocketApp.controller, onBack = { screen = backTo }, onOpenRoot = { openFrom(Screen.SMART, Screen.ROOT) })
@@ -480,7 +501,7 @@ class MainActivity : ComponentActivity() {
                 }
                 }
                 }
-                if (!pocketApp.controller.tourDone && !crashed) com.pocketcode.ui.TourOverlay(onDone = { pocketApp.controller.finishTour() })
+                if (!pocketApp.controller.tourDone && !crashed) com.pocketcode.ui.TourOverlay(onDone = { pocketApp.controller.finishTour() }, onOpenLearn = { pocketApp.controller.finishTour(); screen = Screen.LEARN; backTo = Screen.HUB_MORE })
             }
         }
     }

@@ -44,10 +44,10 @@ class UndoJournal(private val maxTurns: Int = 5, private val maxFileBytes: Long 
     @Synchronized
     fun pendingFiles(): Int = turns.lastOrNull { it.before.isNotEmpty() }?.before?.size ?: 0
 
-    /** Возвращает файлы последнего хода в прежнее состояние. Текст результата — для показа пользователю. */
+    /** Возвращает файлы последнего хода в прежнее состояние. Результат — отдельные фразы (их переводит вызывающий). */
     @Synchronized
-    fun rollback(): String {
-        val t = turns.lastOrNull { it.before.isNotEmpty() } ?: return "Откатывать нечего: агент пока не менял файлы."
+    fun rollbackParts(): List<String> {
+        val t = turns.lastOrNull { it.before.isNotEmpty() } ?: return listOf("Откатывать нечего: агент пока не менял файлы.")
         var restored = 0
         var removed = 0
         var failed = 0
@@ -65,8 +65,11 @@ class UndoJournal(private val maxTurns: Int = 5, private val maxFileBytes: Long 
             }
         }
         turns.remove(t)
-        return "Откат готов: возвращено файлов $restored, удалено созданных $removed" +
-            (if (failed > 0) ", не удалось $failed" else "") +
-            (if (t.skipped > 0) ". Крупные файлы (${t.skipped}) не сохранялись и не откатились" else "") + "."
+        val out = mutableListOf("Откат готов: возвращено файлов $restored, удалено созданных $removed.")
+        if (failed > 0) out += "Не удалось вернуть файлов: $failed."
+        if (t.skipped > 0) out += "Крупные файлы (${t.skipped}) не сохранялись и не откатились."
+        return out
     }
+
+    fun rollback(): String = rollbackParts().joinToString(" ")
 }

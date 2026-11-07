@@ -451,13 +451,13 @@ fun SettingsScreen(
                         FilterChip(
                             selected = false,
                             onClick = { countText = if (c > 0) c.toString() else ""; amountText = m.toString(); unit = u; apply(countText, amountText, u) },
-                            label = { Text(if (c == 0) "Без лимита" else "$c за ${if (u == 60) "$m мин" else "$m ч"}") },
+                            label = { Text(if (c == 0) "Без лимита" else "$c запросов (за ${if (u == 60) "$m мин" else "$m ч"})") },
                         )
                     }
                 }
             }
             Text(
-                if (vm.rpmLimit > 0) "Сейчас: не больше ${vm.rateText()}. Пока в окне есть место, запросы идут сразу, потом агент ждёт и может казаться «зависшим»." else "Сейчас без ограничений.",
+                if (vm.rpmLimit > 0) "Лимит включён: не больше ${vm.rateText()}. Пока в окне есть место, запросы идут сразу, потом агент ждёт и может казаться «зависшим»." else "Сейчас без ограничений.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(
