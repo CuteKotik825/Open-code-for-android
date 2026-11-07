@@ -41,7 +41,7 @@ class ReadFileTool(private val ws: Workspace) : Tool {
     }
 }
 
-class WriteFileTool(private val ws: Workspace) : Tool {
+class WriteFileTool(private val ws: Workspace, private val journal: UndoJournal? = null) : Tool {
     override val name = "write_file"
     override val description =
         "Создаёт файл или полностью перезаписывает существующий. Недостающие папки создаются сами. " +
@@ -69,6 +69,7 @@ class WriteFileTool(private val ws: Workspace) : Tool {
         require(!f.isDirectory) { "Это папка: ${ws.rel(f)}" }
         val existed = f.exists()
         val before = if (existed && f.length() < 500_000) runCatching { f.readText() }.getOrNull() else null
+        journal?.record(f)
         f.parentFile?.mkdirs()
         f.writeText(content)
         val head = (if (existed) "Файл перезаписан: " else "Файл создан: ") +
@@ -81,7 +82,7 @@ class WriteFileTool(private val ws: Workspace) : Tool {
     }
 }
 
-class EditFileTool(private val ws: Workspace) : Tool {
+class EditFileTool(private val ws: Workspace, private val journal: UndoJournal? = null) : Tool {
     override val name = "edit_file"
     override val description =
         "Заменяет точный фрагмент old_string на new_string в существующем файле. " +
@@ -126,6 +127,7 @@ class EditFileTool(private val ws: Workspace) : Tool {
             "Фрагмент встречается $count раз. Добавь контекста или укажи replace_all=true."
         }
         val updated = if (all) text.replace(old, new) else text.replaceFirst(old, new)
+        journal?.record(f)
         f.writeText(updated)
         return "Готово: ${ws.rel(f)} (замен: ${if (all) count else 1})\n" + lineDiff(text, updated)
     }

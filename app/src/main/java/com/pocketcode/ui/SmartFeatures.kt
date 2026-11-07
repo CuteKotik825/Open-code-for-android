@@ -45,6 +45,17 @@ class SmartFeatures(private val store: SettingsStore) {
     var smartTrim by mutableStateOf(flag("sf_trim", true))
         private set
 
+    /** Откат правок: перед записью файла агентом запоминается прежнее содержимое. */
+    var undoOn by mutableStateOf(flag("sf_undo", true))
+        private set
+
+    /** Журнал авто-режима сохраняется в файл. */
+    var logToFile by mutableStateOf(flag("sf_autolog", true))
+        private set
+
+    fun changeUndo(v: Boolean) { undoOn = v; save("sf_undo", v) }
+    fun changeLogToFile(v: Boolean) { logToFile = v; save("sf_autolog", v) }
+
     fun changeBreaker(v: Boolean) { breakerOn = v; save("sf_breaker", v) }
 
     fun changeBreakerLimit(n: Int) {
