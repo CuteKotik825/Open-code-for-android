@@ -164,7 +164,75 @@ object Subtitles {
         return if (best < 0) text else text.substring(0, best) + "\n" + text.substring(best + 1)
     }
 
-    private fun wrapAss(text: String) = wrap(text).replace("\n", "\\N")
+    // ---------- подгонка текста под ширину кадра ----------
+
+    /** Ширина символа жирного DejaVu Sans в долях размера шрифта (с небольшим запасом). */
+    private fun glyphEm(c: Char): Double = when {
+        c == ' ' -> 0.35
+        c.isDigit() -> 0.70
+        c.isLetter() && c.isUpperCase() -> if (c.code in 0x400..0x4FF) 0.88 else 0.78
+        c.isLetter() -> if (c.code in 0x400..0x4FF) 0.70 else 0.66
+        else -> 0.46
+    }
+
+    private fun widthEm(s: String): Double {
+        var t = 0.0
+        for (c in s) t += glyphEm(c)
+        return t
+    }
+
+    /** Раскладка надписи: после каких слов делать перенос строки и какой размер шрифта взять. */
+    private class Fit(val breaks: Set<Int>, val size: Int)
+
+    /**
+     * Подбирает переносы (не больше [maxLines] строк) и размер шрифта так, чтобы надпись целиком влезала в [avail] пикселей.
+     * Шрифт уменьшается, только если иначе не помещается. [grow] — во сколько раз надпись раздувается в анимации.
+     * [softChars] — при большей длине текста сразу делим на несколько строк, даже если в кадр влезло бы в одну.
+     */
+    private fun fit(words: List<String>, size: Int, avail: Double, maxLines: Int, grow: Double = 1.0, softChars: Int = 0): Fit {
+        val n = words.size
+        if (n == 0) return Fit(emptySet(), size)
+        val limit = avail / grow
+        val wEm = DoubleArray(n) { widthEm(words[it]) }
+        val space = glyphEm(' ')
+        fun lineEm(a: Int, b: Int): Double {
+            var t = 0.0
+            for (i in a..b) t += wEm[i]
+            return t + space * (b - a)
+        }
+        val maxK = minOf(maxLines, n).coerceAtLeast(1)
+        val inf = Double.MAX_VALUE
+        // dp[k][i]: самая широкая строка при лучшем разбиении первых i слов на k строк
+        val dp = Array(maxK + 1) { DoubleArray(n + 1) { inf } }
+        val cut = Array(maxK + 1) { IntArray(n + 1) }
+        dp[0][0] = 0.0
+        for (k in 1..maxK) for (i in k..n) for (j in (k - 1) until i) {
+            if (dp[k - 1][j] == inf) continue
+            val v = maxOf(dp[k - 1][j], lineEm(j, i - 1))
+            if (v < dp[k][i]) { dp[k][i] = v; cut[k][i] = j }
+        }
+        val chars = words.sumOf { it.length } + n - 1
+        val first = if (softChars > 0) ((chars + softChars - 1) / softChars).coerceIn(1, maxK) else 1
+        var bestK = first
+        var bestSize = -1
+        for (k in first..maxK) {
+            val em = dp[k][n]
+            val sz = if (em * size <= limit) size else maxOf((limit / em).toInt(), size * 2 / 5, 8)
+            if (sz > bestSize + 1) { bestSize = sz; bestK = k }
+            if (sz == size) break
+        }
+        val br = HashSet<Int>()
+        var i = n
+        for (k in bestK downTo 2) {
+            val j = cut[k][i]
+            br += j - 1
+            i = j
+        }
+        return Fit(br, bestSize)
+    }
+
+    private fun joinFit(words: List<String>, f: Fit): String =
+        words.withIndex().joinToString("") { (i, x) -> x + if (i in f.breaks) "\\N" else if (i < words.lastIndex) " " else "" }
 
     private class Spec(
         val fs: Int, val primary: String, val secondary: String, val outlineColor: String, val backColor: String,
@@ -198,20 +266,22 @@ object Subtitles {
     /**
      * ASS для вшивания через ffmpeg. [w] и [h] — размер готового кадра, поэтому масштабирования шрифта нет.
      * [shift] вычитается из времён (для частей, которые рендерятся отдельно).
+     * Каждая надпись переносится и при нехватке места уменьшается так, чтобы целиком помещаться в кадр
+     * (особенно важно для вертикального видео); для каждого размера создаётся свой стиль.
      */
     fun ass(phrases: List<Phrase>, style: SubStyle, w: Int, h: Int, shift: Double): String {
         val sp = spec(style, w, h)
         val mx = (w * 0.06).roundToInt()
-        val sb = StringBuilder()
-        sb.append("[Script Info]\nScriptType: v4.00+\nPlayResX: $w\nPlayResY: $h\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n")
-        sb.append("[V4+ Styles]\n")
-        sb.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
-        sb.append("Style: Default,DejaVu Sans,${sp.fs},${sp.primary},${sp.secondary},${sp.outlineColor},${sp.backColor},-1,0,0,0,100,100,0,0,${sp.border},${String.format(Locale.US, "%.1f", sp.outline)},${String.format(Locale.US, "%.1f", sp.shadow)},${sp.align},$mx,$mx,${sp.mv},1\n\n")
-        sb.append("[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+        // Плашка выступает за текст на величину обводки, это тоже должно поместиться
+        val avail = (w - 2.0 * mx) - (if (sp.border == 3) 2 * sp.outline else 0.0)
+        val sizes = LinkedHashMap<Int, String>()
+        fun styleFor(size: Int): String = sizes.getOrPut(size) { if (size == sp.fs) "Default" else "S$size" }
+        styleFor(sp.fs)
+        val ev = StringBuilder()
 
-        fun dl(layer: Int, s: Double, e: Double, text: String) {
+        fun dl(layer: Int, s: Double, e: Double, size: Int, text: String) {
             if (e - s < 0.02) return
-            sb.append("Dialogue: $layer,${assTime(s)},${assTime(e)},Default,,0,0,0,,").append(text).append('\n')
+            ev.append("Dialogue: $layer,${assTime(s)},${assTime(e)},${styleFor(size)},,0,0,0,,").append(text).append('\n')
         }
 
         for ((pi, p) in phrases.withIndex()) {
@@ -220,59 +290,82 @@ object Subtitles {
             if (e <= 0.0) continue
             val ws = p.words
             when (style) {
-                SubStyle.CLASSIC, SubStyle.BOX -> dl(0, s, e, "{\\fad(90,90)}" + wrapAss(p.text))
+                SubStyle.CLASSIC, SubStyle.BOX -> {
+                    val words = ws.map { it.text }
+                    val f = fit(words, sp.fs, avail, 3, softChars = 36)
+                    dl(0, s, e, f.size, "{\\fad(90,90)}" + joinFit(words, f))
+                }
 
                 SubStyle.KARAOKE -> {
-                    val total = ws.sumOf { it.text.length + 1 }
-                    var acc = 0
-                    var br = -1
-                    if (total > 32) for ((i, x) in ws.withIndex()) { acc += x.text.length + 1; if (acc >= total / 2 && br < 0) br = i }
+                    val f = fit(ws.map { it.text }, sp.fs, avail, 2, softChars = 32)
                     val text = ws.withIndex().joinToString("") { (i, x) ->
                         val until = if (i + 1 < ws.size) ws[i + 1].start else p.end
                         val k = ((until - x.start) * 100).roundToInt().coerceAtLeast(1)
-                        "{\\k$k}" + x.text + if (i == br) "\\N" else if (i < ws.lastIndex) " " else ""
+                        "{\\k$k}" + x.text + if (i in f.breaks) "\\N" else if (i < ws.lastIndex) " " else ""
                     }
-                    dl(0, s, e, "{\\fad(60,60)}$text")
+                    dl(0, s, e, f.size, "{\\fad(60,60)}$text")
                 }
 
                 // Слова появляются по очереди; ещё не сказанные скрыты (но место держат), поэтому строка не «ездит»
-                SubStyle.POP -> for (k in ws.indices) {
-                    val st = if (k == 0) s else ws[k].start - shift
-                    val en = if (k + 1 < ws.size) ws[k + 1].start - shift else e
-                    val text = buildString {
-                        for ((i, x) in ws.withIndex()) {
-                            val t = tidy(x.text).uppercase()
-                            when {
-                                i < k -> append(t)
-                                i == k -> append("{\\c$YELLOW\\fscx82\\fscy82\\t(0,90,\\fscx118\\fscy118)\\t(90,190,\\fscx100\\fscy100)}$t{\\r}")
-                                else -> append("{\\alpha&HFF&}$t{\\alpha&H00&}")
+                SubStyle.POP -> {
+                    val up = ws.map { tidy(it.text).uppercase() }
+                    val f = fit(up, sp.fs, avail, 2, grow = 1.18)
+                    for (k in ws.indices) {
+                        val st = if (k == 0) s else ws[k].start - shift
+                        val en = if (k + 1 < ws.size) ws[k + 1].start - shift else e
+                        val text = buildString {
+                            for ((i, t) in up.withIndex()) {
+                                when {
+                                    i < k -> append(t)
+                                    i == k -> append("{\\c$YELLOW\\fscx82\\fscy82\\t(0,90,\\fscx118\\fscy118)\\t(90,190,\\fscx100\\fscy100)}$t{\\r}")
+                                    else -> append("{\\alpha&HFF&}$t{\\alpha&H00&}")
+                                }
+                                if (i < up.lastIndex) append(if (i in f.breaks) "\\N" else " ")
                             }
-                            if (i < ws.lastIndex) append(' ')
                         }
+                        dl(0, st, en, f.size, text)
                     }
-                    dl(0, st, en, text)
                 }
 
                 SubStyle.BIG -> {
                     val x = tidy(ws.first().text).uppercase()
+                    val f = fit(listOf(x), sp.fs, avail, 1, grow = 1.12)
                     val color = BIG_COLORS[pi % BIG_COLORS.size]
                     val y = (h * if (h > w) 0.58 else 0.5).roundToInt()
-                    dl(0, s, e, "{\\an5\\pos(${w / 2},$y)\\c$color\\fscx70\\fscy70\\t(0,90,\\fscx112\\fscy112)\\t(90,170,\\fscx100\\fscy100)}$x")
+                    dl(0, s, e, f.size, "{\\an5\\pos(${w / 2},$y)\\c$color\\fscx70\\fscy70\\t(0,90,\\fscx112\\fscy112)\\t(90,170,\\fscx100\\fscy100)}$x")
                 }
 
                 SubStyle.NEON -> {
                     val glow = if (pi % 2 == 0) "&HFF40FF&" else "&HFFE500&"
-                    val txt = wrapAss(p.text)
-                    dl(0, s, e, "{\\fad(120,120)\\bord9\\3c$glow\\c$glow\\blur12\\alpha&H30&}$txt")
-                    dl(1, s, e, "{\\fad(120,120)\\bord1.5\\3c$glow\\c$WHITE\\blur0.8}$txt")
+                    val words = ws.map { it.text }
+                    val f = fit(words, sp.fs, avail, 2)
+                    val k = f.size.toDouble() / sp.fs
+                    val txt = joinFit(words, f)
+                    val bord = String.format(Locale.US, "%.1f", 9 * k)
+                    val blur = String.format(Locale.US, "%.1f", 12 * k)
+                    val bord2 = String.format(Locale.US, "%.1f", 1.5 * k)
+                    dl(0, s, e, f.size, "{\\fad(120,120)\\bord$bord\\3c$glow\\c$glow\\blur$blur\\alpha&H30&}$txt")
+                    dl(1, s, e, f.size, "{\\fad(120,120)\\bord$bord2\\3c$glow\\c$WHITE\\blur0.8}$txt")
                 }
 
                 SubStyle.COMIC -> {
-                    val txt = wrapAss(tidy(p.text).uppercase())
-                    dl(0, s, e, "{\\frz-3\\fad(30,40)\\fscx75\\fscy75\\t(0,110,\\fscx110\\fscy110)\\t(110,200,\\fscx100\\fscy100)}$txt")
+                    val words = tidy(p.text).uppercase().split(' ').filter { it.isNotEmpty() }
+                    val f = fit(words, sp.fs, avail, 2, grow = 1.12)
+                    dl(0, s, e, f.size, "{\\frz-3\\fad(30,40)\\fscx75\\fscy75\\t(0,110,\\fscx110\\fscy110)\\t(110,200,\\fscx100\\fscy100)}" + joinFit(words, f))
                 }
             }
         }
+
+        val sb = StringBuilder()
+        sb.append("[Script Info]\nScriptType: v4.00+\nPlayResX: $w\nPlayResY: $h\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n")
+        sb.append("[V4+ Styles]\n")
+        sb.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
+        for ((size, name) in sizes) {
+            val k = size.toDouble() / sp.fs
+            sb.append("Style: $name,DejaVu Sans,$size,${sp.primary},${sp.secondary},${sp.outlineColor},${sp.backColor},-1,0,0,0,100,100,0,0,${sp.border},${String.format(Locale.US, "%.1f", sp.outline * k)},${String.format(Locale.US, "%.1f", sp.shadow * k)},${sp.align},$mx,$mx,${sp.mv},1\n")
+        }
+        sb.append("\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+        sb.append(ev)
         return sb.toString()
     }
 }

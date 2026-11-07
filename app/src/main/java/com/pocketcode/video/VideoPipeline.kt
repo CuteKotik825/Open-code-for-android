@@ -822,7 +822,7 @@ class VideoPipeline(
         }
         var clean = name.replace(Regex("[^\\p{L}\\p{N}._-]+"), "_").trim('_', '.')
         if (clean.isBlank()) clean = "video"
-        if (!clean.contains('.')) clean += ".mp4"
+        if (File(clean).extension.lowercase() !in VIDEO_EXT) clean += ".mp4"
         val dir = File(root(), "video").apply { mkdirs() }
         val base = File(clean).nameWithoutExtension
         val ext = File(clean).extension
