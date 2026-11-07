@@ -207,6 +207,7 @@ fun ChatScreen(
                     }
                 }
             }
+            RateStatusLine()
             if (vm.contextUsed > 0) {
                 val limit = vm.effectiveContext.coerceAtLeast(1)
                 val frac = (vm.contextUsed.toFloat() / limit).coerceIn(0f, 1f)
@@ -935,6 +936,10 @@ private fun EmptyHint(workspacePath: String, welcome: (@Composable () -> Unit)?,
                 "🤖 Telegram-бот" to "Создай простого Telegram-бота на aiogram 3 с командами /start и /help. Токен читай из переменной окружения BOT_TOKEN.",
                 "🌐 Сайт" to "Сделай простую адаптивную страницу index.html и открой превью.",
                 "📝 README" to "Напиши README.md для этого проекта.",
+                "🔧 Почини сборку" to "Запусти сборку или проверку проекта, найди причину ошибки и исправь её. Покажи, что именно было не так.",
+                "📖 Объясни код" to "Объясни простыми словами, как устроен главный файл этого проекта и что в нём важно.",
+                "♻️ Упрости код" to "Найди самое запутанное место в проекте и предложи, как его упростить. Сначала покажи план, ничего не меняй без моего согласия.",
+                "📦 Зависимости" to "Проверь зависимости проекта: что устарело или не используется. Покажи список, ничего не обновляй без моего согласия.",
             ).forEach { (title, text) ->
                 androidx.compose.material3.SuggestionChip(onClick = { onPick(text) }, label = { Text(title) })
             }

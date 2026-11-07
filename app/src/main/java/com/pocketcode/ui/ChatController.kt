@@ -443,7 +443,24 @@ class ChatController(
     /** Что решил авто-режим: новые записи сверху, до 100 штук. */
     val rootAutoLog = androidx.compose.runtime.mutableStateListOf<String>()
 
+    private val autoLogFile get() = File(app.filesDir, "auto-log.txt")
+
+    /** Хвост сохранённого журнала авто-режима (самые свежие записи внизу). */
+    fun autoLogText(): String = runCatching { autoLogFile.takeIf { it.isFile }?.readText()?.takeLast(6000).orEmpty() }.getOrDefault("")
+
+    fun clearAutoLog() {
+        runCatching { autoLogFile.delete() }
+        rootAutoLog.clear()
+    }
+
     private fun logAuto(text: String) {
+        if (smart.logToFile) {
+            runCatching {
+                val f = autoLogFile
+                if (f.length() > 200_000) f.writeText(f.readText().takeLast(100_000))
+                f.appendText(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()) + " " + text.take(300) + "\n")
+            }
+        }
         scope.launch {
             rootAutoLog.add(0, java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()) + " " + text.take(160))
             while (rootAutoLog.size > 100) rootAutoLog.removeAt(rootAutoLog.lastIndex)
@@ -488,6 +505,45 @@ class ChatController(
 
     /** Выключатели умных функций (предохранитель, корзина, двойная проверка, карта проекта и др.). */
     val smart = SmartFeatures(settingsStore)
+
+    /** Быстрые режимы: одним выбором меняют сразу несколько настроек. Возвращает описание того, что включено. */
+    fun applyPreset(name: String): String {
+        return when (name) {
+            "eco" -> {
+                saveSettings(settings.copy(ecoMode = true), profiles, activeProfileId)
+                smart.changeSmartTrim(true); smart.changeMemory(false)
+                if (settings.helperModel.isNotBlank()) setAutoRouteValue(true)
+                "Экономно: эко-режим вкл, умное сокращение вывода вкл, карта проекта выкл" + if (settings.helperModel.isNotBlank()) ", автовыбор модели вкл." else "."
+            }
+            "max" -> {
+                saveSettings(settings.copy(ecoMode = false), profiles, activeProfileId)
+                smart.changeSmartTrim(false); smart.changeMemory(true); setAutoRouteValue(false)
+                "Максимум качества: эко-режим выкл, автовыбор модели выкл, вывод инструментов режется без хвоста, карта проекта вкл."
+            }
+            else -> {
+                saveSettings(settings.copy(ecoMode = true), profiles, activeProfileId)
+                smart.changeSmartTrim(true); smart.changeMemory(false)
+                smart.changeUndo(true); undo.enabled = true
+                "Для бесплатных моделей: эко-режим вкл, откат правок вкл. Лимит запросов задай отдельно в профиле."
+            }
+        }
+    }
+
+    /** Журнал отката правок файлов агентом. */
+    val undo = com.pocketcode.tools.UndoJournal().also { it.enabled = smart.undoOn }
+
+    var undoVersion by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
+
+    fun changeUndo(on: Boolean) {
+        smart.changeUndo(on)
+        undo.enabled = on
+    }
+
+    fun rollbackLastTurn() {
+        postNote(undo.rollback())
+        undoVersion++
+    }
 
     private val autoStamps = ArrayDeque<Long>()
 
@@ -1729,9 +1785,43 @@ class ChatController(
 
     suspend fun checkText(fileName: String, text: String): String = editorDiag.checkText(fileName, text)
 
+    /** Дополнительные резервные профили после основного резервного: пробуются по порядку. */
+    var fallbackChain by mutableStateOf((settingsStore.rawGet("fallbackChain") ?: "").split(',').filter { it.isNotBlank() })
+        private set
+
+    fun toggleFallbackChain(id: String) {
+        fallbackChain = if (id in fallbackChain) fallbackChain - id else fallbackChain + id
+        settingsStore.rawPut("fallbackChain", fallbackChain.joinToString(","))
+    }
+
     private fun makeFallback(s: Settings): LlmClient? {
-        val p = profiles.firstOrNull { it.id == s.fallbackProfileId && it.id != activeProfileId } ?: return null
-        return makeLlm(s.copy(provider = p.provider, baseUrl = p.baseUrl, apiKey = p.apiKey), p.model)
+        val ids = (listOf(s.fallbackProfileId) + fallbackChain).filter { it.isNotBlank() && it != activeProfileId }.distinct()
+        val list = ids.mapNotNull { id -> profiles.firstOrNull { it.id == id } }
+            .map { p -> p.label to makeLlm(s.copy(provider = p.provider, baseUrl = p.baseUrl, apiKey = p.apiKey), p.model) }
+        return when {
+            list.isEmpty() -> null
+            list.size == 1 -> list[0].second
+            else -> com.pocketcode.llm.ChainLlm(list) { msg -> postNote(msg) }
+        }
+    }
+
+    /** Настройки, которые противоречат друг другу или ничего не делают; пустой список — всё в порядке. */
+    fun settingsProblems(): List<String> {
+        val out = mutableListOf<String>()
+        val s = settings
+        if (autoRoute && s.helperModel.isBlank()) out += "Автовыбор модели включён, но модель-помощник не указана: он ничего не делает."
+        if (rootAuto && rootReviewMode == "ai" && profiles.none { it.id == rootReviewerId && it.apiKey.isNotBlank() }) {
+            out += "Авто-режим просит проверять файлы нейросетью, но проверяющий профиль не выбран или без ключа: все файловые действия будет подтверждать человек."
+        }
+        if (smart.doubleDelete && (rootReviewMode != "ai" || profiles.none { it.id == smart.secondReviewer })) {
+            out += "Двойная проверка удаления включена, но второй проверяющий не выбран или авто-режим работает не через нейросеть: удаление будет спрашивать тебя."
+        }
+        if (s.fallbackProfileId.isNotBlank() && profiles.none { it.id == s.fallbackProfileId }) out += "Резервный профиль указан, но такого профиля уже нет."
+        val gone = fallbackChain.filter { id -> profiles.none { it.id == id } }
+        if (gone.isNotEmpty()) out += "В цепочке резервных профилей есть удалённые профили (${gone.size})."
+        if (smart.memoryOn && s.ecoMode) out += "Карта проекта включена вместе с эко-режимом: она добавляет тысячи токенов к каждому запросу."
+        if (rpmLimit > 0 && ratePeriodSec < 5) out += "Период лимита запросов меньше 5 секунд: так короткое окно почти ничего не ограничивает."
+        return out
     }
 
     fun runSelfCheck() {
@@ -1756,6 +1846,11 @@ class ChatController(
             step("API-ключ и профиль") {
                 require(s.apiKey.isNotBlank()) { "ключ не указан" }
                 "${s.provider.label}, ${s.model}"
+            }
+            step("Согласованность настроек") {
+                val problems = settingsProblems()
+                require(problems.isEmpty()) { problems.joinToString("\n") { "• $it" } }
+                "противоречий нет"
             }
             step("Связь с моделью") {
                 require(s.apiKey.isNotBlank()) { "нужен ключ" }
@@ -2307,6 +2402,36 @@ class ChatController(
 
     fun forgetModelName(name: String) = writeSavedModels(savedModels - name)
 
+    var keyCheckMsg by mutableStateOf<String?>(null)
+        private set
+
+    /** Быстрая бесплатная проверка: ключ принят и модель есть в списке сервиса (токены не тратятся). */
+    fun checkKeyQuick(provider: com.pocketcode.Provider, baseUrl: String, apiKey: String, model: String) {
+        if (modelsBusy) return
+        if (apiKey.isBlank()) { keyCheckMsg = "❌ Ключ не заполнен"; return }
+        modelsBusy = true
+        keyCheckMsg = "Проверяю ключ…"
+        scope.launch {
+            keyCheckMsg = try {
+                val list = com.pocketcode.llm.ModelList.fetch(provider, baseUrl, apiKey)
+                fetchedModels = list
+                when {
+                    list.isEmpty() -> "⚪ Ключ принят, но сервис не отдал список моделей: проверь модель кнопкой «Проверить модель»."
+                    model.trim() in list -> "✅ Ключ принят, модель «${model.trim()}» есть в списке."
+                    else -> "⚠ Ключ принят, но модели «${model.trim()}» нет в списке сервиса. Выбери из списка с сервера."
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val m = e.message ?: "ошибка"
+                if (m.contains("HTTP 401") || m.contains("HTTP 403")) "❌ Ключ не принят ($m)"
+                else "⚪ Не удалось проверить без траты токенов ($m). Нажми «Проверить модель»."
+            } finally {
+                modelsBusy = false
+            }
+        }
+    }
+
     fun loadModelList(provider: com.pocketcode.Provider, baseUrl: String, apiKey: String) {
         if (modelsBusy) return
         modelsBusy = true
@@ -2507,7 +2632,7 @@ class ChatController(
 
     private val backupPrefKeys = listOf(
         "syncRepo", "syncProjects", "syncInterval", "syncHost", "ocFallback", "ocAutoSwitch", "ocAutoCompact", "ocRateRetryMin",
-        "hostMode", "rootDelay", "rpmLimit", "ratePeriod", "savedModels", "ocBudget", "ocListLim", "ocShowLim", "ocFresh", "ocExtMode", "ocModel", "ocCards", "themeMode", "palette", "amoled", "templates", "stars", "ocPins", "ocTitles", "bigInput",
+        "hostMode", "rootDelay", "rpmLimit", "ratePeriod", "savedModels", "fallbackChain", "profileRates", "sf_undo", "ocBudget", "ocListLim", "ocShowLim", "ocFresh", "ocExtMode", "ocModel", "ocCards", "themeMode", "palette", "amoled", "templates", "stars", "ocPins", "ocTitles", "bigInput",
     )
 
     private fun cryptKey(password: String, salt: ByteArray): javax.crypto.spec.SecretKeySpec {
@@ -3189,7 +3314,7 @@ class ChatController(
     /** Запросов к модели в минуту (0 = без ограничений). Общий лимит для агента приложения и для локального прокси. */
     var rpmLimit by mutableIntStateOf(settingsStore.rawGet("rpmLimit")?.toIntOrNull() ?: 0)
         private set
-    fun setRpmLimitValue(v: Int) { rpmLimit = v; RateGate.configure(rpmLimit, ratePeriodSec); settingsStore.rawPut("rpmLimit", v.toString()); ocApplyRate() }
+    fun setRpmLimitValue(v: Int) { rpmLimit = v; applyEffectiveRate(); settingsStore.rawPut("rpmLimit", v.toString()); ocApplyRate() }
 
     /** За какой промежуток действует лимит запросов, в секундах (по умолчанию минута). */
     var ratePeriodSec by mutableIntStateOf(settingsStore.rawGet("ratePeriod")?.toIntOrNull()?.coerceAtLeast(1) ?: 60)
@@ -3197,8 +3322,32 @@ class ChatController(
 
     fun setRatePeriodValue(sec: Int) {
         ratePeriodSec = sec.coerceIn(1, 7 * 24 * 3600)
-        RateGate.configure(rpmLimit, ratePeriodSec)
+        applyEffectiveRate()
         settingsStore.rawPut("ratePeriod", ratePeriodSec.toString())
+    }
+
+    /** Свои лимиты профилей: «id:запросов:секунд;…». Пусто — действует общий лимит. */
+    private var profileRates: Map<String, Pair<Int, Int>> = (settingsStore.rawGet("profileRates") ?: "").split(';').mapNotNull { e ->
+        val p = e.split(':')
+        if (p.size == 3) p[1].toIntOrNull()?.let { c -> p[2].toIntOrNull()?.let { sec -> p[0] to (c to sec) } } else null
+    }.toMap()
+
+    var profileRatesVersion by mutableIntStateOf(0)
+        private set
+
+    fun profileRate(id: String): Pair<Int, Int>? = profileRates[id]
+
+    fun setProfileRate(id: String, count: Int, periodSec: Int) {
+        profileRates = if (count > 0) profileRates + (id to (count to periodSec.coerceAtLeast(1))) else profileRates - id
+        settingsStore.rawPut("profileRates", profileRates.entries.joinToString(";") { "${it.key}:${it.value.first}:${it.value.second}" })
+        profileRatesVersion++
+        applyEffectiveRate()
+    }
+
+    /** Лимит активного профиля, если он задан, иначе общий. */
+    fun applyEffectiveRate() {
+        val own = profileRates[activeProfileId]
+        if (own != null) RateGate.configure(own.first, own.second) else RateGate.configure(rpmLimit, ratePeriodSec)
     }
 
     /** Лимит словами: «5 запросов за 10 мин». */
@@ -3245,7 +3394,7 @@ class ChatController(
     private val rateProxy = com.pocketcode.llm.RateProxy(rateToken)
     var rateProxyOk by mutableStateOf(false)
         private set
-    init { RateGate.configure(rpmLimit, ratePeriodSec); rateProxyOk = rateProxy.start(); if (rpmLimit > 0) ocApplyRate() }
+    init { applyEffectiveRate(); rateProxyOk = rateProxy.start(); if (rpmLimit > 0) ocApplyRate() }
 
     /** Адрес сервиса, завёрнутый в локальный прокси с лимитом. Его вставляют как Base URL в Claude Code / OpenCode / что угодно. */
     fun rateWrapUrl(upstream: String): String = com.pocketcode.llm.RateProxy.wrap(rateToken, upstream.trim())
@@ -4355,6 +4504,7 @@ class ChatController(
         val expanded = extensions.expand(trimmed)
         if (currentId == null) currentId = UUID.randomUUID().toString()
         val current = ensureAgent()
+        undo.beginTurn()
         if (auto) autoChain++ else autoChain = 0
         val planNote = if (planMode) "[РЕЖИМ ПЛАНА: пока ничего не меняй и не запускай. Изучи код (чтение, поиск), затем вызови present_plan с планом и жди одобрения.]\n\n" else ""
         limitHit = false
@@ -4585,6 +4735,7 @@ class ChatController(
     }
 
     private fun ensureAgent(): Agent {
+        applyEffectiveRate()
         agent?.let { return it }
         val s = settings
         val ctxLimit = effectiveContext
@@ -4594,8 +4745,8 @@ class ChatController(
         }
         val baseTools = listOf(
             ReadFileTool(workspace),
-            WriteFileTool(workspace),
-            EditFileTool(workspace),
+            WriteFileTool(workspace, undo),
+            EditFileTool(workspace, undo),
             ListDirTool(workspace),
             GrepTool(workspace),
             BashTool(workspace, com.pocketcode.tools.TrashShell(shell) { smart.trashOn }),
